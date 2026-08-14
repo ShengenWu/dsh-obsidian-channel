@@ -1,0 +1,37 @@
+# dsh-obsidian-channel bundle patch (M1: 安全内核 + 写侧 + 回滚)
+#
+# Mounts a model-facing Obsidian write-side toolset with an approval gate,
+# a change journal (.dsh-obsidian/journal) and byte-level rollback:
+#   obsidian_note_create / obsidian_note_update / obsidian_note_append /
+#   obsidian_note_delete / obsidian_batch
+#   obsidian_history / obsidian_undo / obsidian_rollback / obsidian_restore
+#   obsidian_read (returns content + version token for guarded updates)
+#
+# All file access goes through ctx.fs (the official FileSystem seam);
+# approvals go through ctx.approval (the official one-shot approval seam,
+# fail-closed). Destructive moves use host-side rename ONLY inside the
+# vault boundary (trash). Reads are never gated; dry-run never writes.
+#
+# Coexistence: when dsh-obsidian-export is also enabled, its tools stay
+# registered (read/search/list/tags/backlinks/export); this plugin only
+# owns the write side and obsidian_read (its read returns the fs version
+# token, which the upstream read does not).
+
+- insert:
+    - id: dsh-obsidian-channel
+      name: 'dsh-obsidian-channel'
+      inject: [tools, fs, approval]
+      config:
+        # Default vault directory; the model may override per call via vaultDir.
+        # Leave '' to require an explicit vaultDir (or a future discover step).
+        vaultDir: ''
+        # Write approval policy:
+        #   per-write — every mutating call asks (default, safest)
+        #   per-turn  — grant once per (session, model request, tool); resets next request
+        #   auto      — no prompts; user opts in explicitly (not recommended)
+        writePolicy: per-write
+        # Extra directory names excluded from tool access (always added to the
+        # built-in list: .obsidian, .git, .dsh-obsidian, .trash).
+        excludes: []
+        # Journal retention in days (entries older than this are pruned on write).
+        journalRetentionDays: 30

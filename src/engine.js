@@ -1,0 +1,787 @@
+/**
+ * dsh-obsidian-channel — pure core engine (M1).
+ *
+ * Framework-free: every I/O goes through the injected adapters so the whole
+ * safety kernel (boundary, conflict detection, journal, rollback, trash,
+ * frontmatter merge) is unit-testable against an in-memory stub.
+ *
+ * Adapter contracts:
+ *   fs   — the dsh FileSystem seam subset:
+ *          resolve(path) → target          (opaque; absent paths resolvable)
+ *          processPath(target) → abs path
+ *          lstat(path) → { type: 'file'|'directory'|'symlink'|'other' } | undefined
+ *          stat(target) → { version, type, size? } | undefined
+ *          contains(parentTarget, childTarget) → boolean
+ *          readText(target) → string
+ *          listDir(target) → [{ name, type, target }]
+ *          writeText(target, content, expected?) → { operation, version, before, after }
+ *            (throws { code: 'FS_STALE_VERSION' | 'FS_NOT_OBSERVED' } on guard failure)
+ *   host  — guarded host-side file operations (only used for trash moves,
+ *          which the fs seam deliberately cannot express):
+ *          rename(sourceAbs, destAbs) → Promise<void>
+ *          mkdirP(dirAbs) → Promise<void>
+ *          rmrf(dirAbs) → Promise<void>   (journal pruning; optional)
+ *
+ * @module dsh-obsidian-channel/engine
+ */
+
+import { createHash, randomUUID } from 'node:crypto'
+
+// ---------------------------------------------------------------------------
+// Constants & errors
+// ---------------------------------------------------------------------------
+
+/** Plugin-owned admin area inside the vault (json only, no .md pollution). */
+export const ADMIN_DIR = '.dsh-obsidian'
+export const JOURNAL_DIR = '.dsh-obsidian/journal'
+export const TRASH_DIR = '.dsh-obsidian/trash'
+
+/** Built-in excluded directory names (always added to config.excludes). */
+export const DEFAULT_EXCLUDES = ['.obsidian', '.git', '.dsh-obsidian', '.trash']
+
+/** Model-facing error taxonomy. */
+export class SafeError extends Error {
+  constructor(message, code) {
+    super(message)
+    this.name = 'SafeError'
+    this.code = code
+  }
+}
+
+export const sha256 = (text) => createHash('sha256').update(text).digest('hex')
+
+/** Validation regex for frontmatter keys we touch. */
+const FM_KEY_RE = /^[A-Za-z0-9_-]{1,64}$/
+
+/** Frontmatter block at the very start of a note. */
+const FM_BLOCK_RE = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/
+
+const WRITE_SIZE_LIMIT = 2 * 1024 * 1024 // 2 MB per note write
+
+// ---------------------------------------------------------------------------
+// Path utilities (pure)
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalize a model-supplied relative path into a safe relative path.
+ * Rejects absolute paths, drive prefixes, backslash tricks, .. traversal,
+ * empty segments, and leading dots (hidden entries).
+ */
+export function sanitizeRelPath(rel) {
+  if (typeof rel !== 'string' || rel.trim() === '') {
+    throw new SafeError('path must be a non-empty relative path', 'INVALID_PATH')
+  }
+  if (rel.includes('\u0000')) throw new SafeError('path contains a NUL byte', 'INVALID_PATH')
+  if (rel.startsWith('/') || /^[A-Za-z]:/.test(rel)) throw new SafeError('absolute paths are not allowed', 'INVALID_PATH')
+  const norm = rel.replace(/\\\\/g, '/').replace(/\\+/g, '/')
+  const segments = norm.split('/').filter((s) => s !== '' && s !== '.')
+  if (segments.length === 0) throw new SafeError('path is empty', 'INVALID_PATH')
+  for (const seg of segments) {
+    if (seg === '..') throw new SafeError('path traversal is not allowed', 'INVALID_PATH')
+    if (seg.startsWith('.')) throw new SafeError('hidden paths are not allowed', 'INVALID_PATH')
+    if (seg.length > 200) throw new SafeError('path segment too long', 'INVALID_PATH')
+    if (/[<>:"|?*\u0000-\u001f]/.test(seg)) throw new SafeError('path contains invalid characters', 'INVALID_PATH')
+  }
+  return segments.join('/')
+}
+
+/** Whether a relative path lives inside one of the excluded directories. */
+export function relExcluded(rel, excludes = []) {
+  const top = rel.split('/')[0]
+  return [...DEFAULT_EXCLUDES, ...excludes].includes(top)
+}
+
+// ---------------------------------------------------------------------------
+// Vault & boundary
+// ---------------------------------------------------------------------------
+
+/**
+ * Open the vault root: resolve, verify presence and directory-ness.
+ */
+export async function openVault(fs, vaultDir) {
+  if (typeof vaultDir !== 'string' || vaultDir.trim() === '') {
+    throw new SafeError('vaultDir is required (configure the plugin or pass it per call)', 'VAULT_REQUIRED')
+  }
+  const vaultTarget = await fs.resolve(vaultDir)
+  const info = await fs.stat(vaultTarget)
+  if (info === undefined) throw new SafeError('vault not found: ' + vaultDir, 'VAULT_NOT_FOUND')
+  if (info.type !== 'directory') throw new SafeError('vault path is not a directory', 'VAULT_NOT_DIR')
+  return { vaultTarget, vaultAbs: fs.processPath(vaultTarget) }
+}
+
+/**
+ * Resolve a model-supplied relative path against the vault with the full L0
+ * boundary: sanitize, exclude check, symlink-escape rejection, canonical
+ * containment. This is the single gate every read/write funnels through.
+ */
+export async function resolveNotePath(fs, vault, relPath, excludes = []) {
+  const rel = sanitizeRelPath(relPath)
+  if (relExcluded(rel, excludes)) {
+    throw new SafeError('path is inside an excluded directory: ' + rel, 'EXCLUDED')
+  }
+  const abs = vault.vaultAbs + '/' + rel
+  const lp = await fs.lstat(abs)
+  if (lp !== undefined && lp.type === 'symlink') {
+    throw new SafeError('symlink paths are not allowed inside the vault', 'SYMLINK')
+  }
+  const target = await fs.resolve(abs)
+  if (!fs.contains(vault.vaultTarget, target)) {
+    throw new SafeError('path escapes the vault boundary: ' + rel, 'BOUNDARY')
+  }
+  return { target, rel, abs }
+}
+
+// ---------------------------------------------------------------------------
+// Note parsing & frontmatter
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse a note into frontmatter / body / metadata. Byte-preserving: body is
+ * exactly the text after the frontmatter block (or the whole text).
+ */
+export function parseNote(text) {
+  const result = { frontmatter: null, body: text, title: null, tags: [], wikilinks: [] }
+  const m = FM_BLOCK_RE.exec(text)
+  if (m !== null) {
+    result.body = text.slice(m[0].length)
+    const fm = {}
+    for (const line of m[1].split(/\r?\n/)) {
+      const kv = /^([A-Za-z0-9_-]+):[ \t]*(.*)$/.exec(line)
+      if (kv !== null) {
+        const raw = kv[2]
+        fm[kv[1]] = raw.length >= 2 && ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'")))
+          ? raw.slice(1, -1)
+          : raw
+      }
+    }
+    result.frontmatter = fm
+  }
+  const h1 = /^#[ \t]+(.+?)[ \t]*$/m.exec(result.body)
+  if (h1 !== null) result.title = h1[1]
+  const fmTagStr = (typeof result.frontmatter?.tags === 'string' ? result.frontmatter.tags : '').replace(/^\[|\]$/g, '')
+  const fmTagList = fmTagStr.split(/[,\s]+/).filter(Boolean)
+  const fmTags = Array.isArray(result.frontmatter?.tags) ? result.frontmatter.tags.map(String) : []
+  const inlineTags = [...result.body.matchAll(/(?:^|[ \t])#([A-Za-z0-9_\u4e00-\u9fff/-]+)/g)].map((x) => x[1])
+  result.tags = [...new Set([...fmTags, ...fmTagList, ...inlineTags])]
+  result.wikilinks = [...result.body.matchAll(/\[\[([^\]|#^]+)(?:[|#][^\]]*)?\]\]/g)].map((x) => x[1].trim())
+  return result
+}
+
+/** Serialize a frontmatter object for NEW notes (scalar values only). */
+export function renderFrontmatter(fm) {
+  if (fm === null || fm === undefined) return ''
+  if (typeof fm !== 'object' || Array.isArray(fm)) throw new SafeError('frontmatter must be an object', 'INVALID_ARGS')
+  if (Object.keys(fm).length === 0) return ''
+  const lines = ['---']
+  for (const [k, v] of Object.entries(fm)) {
+    if (!FM_KEY_RE.test(k)) throw new SafeError('invalid frontmatter key: ' + k, 'INVALID_ARGS')
+    if (v === null || v === undefined) continue
+    let rendered
+    if (typeof v === 'number' || typeof v === 'boolean') rendered = String(v)
+    else if (Array.isArray(v) && v.every((x) => typeof x === 'string')) {
+      rendered = '[' + v.map((x) => (x.includes(',') ? JSON.stringify(x) : x)).join(', ') + ']'
+    } else if (typeof v === 'string') {
+      rendered = /^[A-Za-z0-9_./# -]+$/.test(v) ? v : JSON.stringify(v)
+    } else {
+      throw new SafeError('unsupported frontmatter value type for key ' + k, 'INVALID_ARGS')
+    }
+    lines.push(k + ': ' + rendered)
+  }
+  lines.push('---', '')
+  return lines.join('\n')
+}
+
+/**
+ * Line-based frontmatter edit: byte-preserving merge.
+ * - updates: { key: stringValue | null } — null removes the key
+ * - deletes: [key, ...]
+ * Only listed keys change; every other byte (body, unknown keys, comments,
+ * ordering) is preserved exactly.
+ */
+export function applyFrontmatterEdit(originalText, updates = {}, deletes = []) {
+  const updateKeys = Object.keys(updates ?? {})
+  const deleteKeys = deletes ?? []
+  const allKeys = [...new Set([...updateKeys, ...deleteKeys])]
+  if (allKeys.length === 0) return { text: originalText, changed: false, edits: [] }
+  for (const k of allKeys) {
+    if (!FM_KEY_RE.test(k)) throw new SafeError('invalid frontmatter key: ' + k, 'INVALID_ARGS')
+  }
+  const m = FM_BLOCK_RE.exec(originalText)
+  if (m === null) throw new SafeError('note has no frontmatter block to edit', 'NO_FRONTMATTER')
+  const block = m[1]
+  const newline = m[0].includes('\r\n') ? '\r\n' : '\n'
+  const edits = []
+  const kept = []
+  const seen = new Set()
+  for (const line of block.split(/\r?\n/)) {
+    const kv = /^([A-Za-z0-9_-]+):[ \t]*(.*)$/.exec(line)
+    if (kv !== null && allKeys.includes(kv[1])) {
+      seen.add(kv[1])
+      const target = updateKeys.includes(kv[1]) ? updates[kv[1]] : null
+      if (target !== null && target !== undefined) {
+        const safe = typeof target === 'string' && !/^[A-Za-z0-9_./# -]+$/.test(target)
+          ? JSON.stringify(target)
+          : String(target)
+        kept.push(kv[1] + ': ' + safe)
+        edits.push({ key: kv[1], kind: 'update' })
+      } else {
+        edits.push({ key: kv[1], kind: 'delete' })
+      }
+      continue
+    }
+    kept.push(line)
+  }
+  for (const k of updateKeys) {
+    if (seen.has(k)) continue
+    const target = updates[k]
+    if (target === null || target === undefined) continue
+    const safe = typeof target === 'string' && !/^[A-Za-z0-9_./# -]+$/.test(target)
+      ? JSON.stringify(target)
+      : String(target)
+    kept.push(k + ': ' + safe)
+    edits.push({ key: k, kind: 'add' })
+  }
+  const newBlock = kept.join(newline)
+  const innerStart = m[0].indexOf(m[1])
+  const head = m[0].slice(0, innerStart)
+  const tail = m[0].slice(innerStart + m[1].length)
+  const text = head + newBlock + tail + originalText.slice(m[0].length)
+  return { text, changed: edits.length > 0, edits }
+}
+
+// ---------------------------------------------------------------------------
+// Journal (L3) & trash (L4)
+// ---------------------------------------------------------------------------
+
+export const journalEntryId = () => randomUUID()
+
+/** Monotonic wall clock: two entries never share a timestamp. */
+let lastMonotonicTs = 0
+export function monotonicNow() {
+  const t = Date.now()
+  lastMonotonicTs = Math.max(t, lastMonotonicTs + 1)
+  return lastMonotonicTs
+}
+
+const pad = (n) => String(n).padStart(2, '0')
+
+function journalRelPath(entry) {
+  const d = new Date(entry.ts ?? Date.now())
+  const day = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate())
+  return JOURNAL_DIR + '/' + day + '/' + entry.opId + '.json'
+}
+
+function serializeEntry(entry) {
+  return JSON.stringify(entry, (_k, v) => (v === undefined ? null : v), 2)
+}
+
+/** Write a journal entry (create) — writeText creates parent dirs on the local backend. */
+export async function writeJournalEntry(fs, vault, entry) {
+  const rel = journalRelPath(entry)
+  const target = await fs.resolve(vault.vaultAbs + '/' + rel)
+  const content = serializeEntry(entry)
+  if (content.length > WRITE_SIZE_LIMIT) throw new SafeError('journal entry exceeds size limit', 'SIZE_LIMIT')
+  await fs.writeText(target, content, { kind: 'createIfAbsent' })
+  return rel
+}
+
+/** Update an existing journal entry in place (status transition planned → done). */
+export async function updateJournalEntry(fs, vault, entry, prevVersion) {
+  const rel = journalRelPath(entry)
+  const target = await fs.resolve(vault.vaultAbs + '/' + rel)
+  const expected = prevVersion === undefined ? undefined : { kind: 'replaceIfVersion', version: prevVersion }
+  await fs.writeText(target, serializeEntry(entry), expected)
+}
+
+async function safeListDir(fs, target) {
+  try {
+    return await fs.listDir(target)
+  } catch {
+    return []
+  }
+}
+
+/** List journal entries (newest first), optionally filtered to one path. */
+export async function listJournal(fs, vault, { relPath, limit = 50 } = {}) {
+  const root = await fs.resolve(vault.vaultAbs + '/' + JOURNAL_DIR)
+  const out = []
+  const days = (await safeListDir(fs, root)).filter((d) => d.type === 'directory').sort((a, b) => (a.name < b.name ? 1 : -1))
+  for (const day of days) {
+    if (out.length >= limit) break
+    const files = (await safeListDir(fs, day.target)).filter((f) => f.type === 'file' && f.name.endsWith('.json'))
+    for (const f of files.sort((a, b) => (a.name < b.name ? 1 : -1))) {
+      if (out.length >= limit) break
+      const text = await fs.readText(f.target)
+      let entry
+      try { entry = JSON.parse(text) } catch { continue }
+      if (relPath !== undefined && entry.path !== relPath) continue
+      out.push(entry)
+    }
+  }
+  out.sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0))
+  return out
+}
+
+/** Fetch one journal entry by opId. */
+export async function journalEntry(fs, vault, opId) {
+  const entries = await listJournal(fs, vault, { limit: 10000 })
+  return entries.find((e) => e.opId === opId) ?? null
+}
+
+/** Find the latest DONE entry for a path (undo target). */
+export async function latestDoneEntry(fs, vault, relPath) {
+  const entries = await listJournal(fs, vault, { relPath, limit: 200 })
+  return entries.find((e) => e.status === 'done') ?? null
+}
+
+/** Collision-safe trash location for a delete: preserves the original path. */
+export function trashRelPath(rel, opId) {
+  return TRASH_DIR + '/' + rel.split('/').join('__') + '.' + opId + '.md'
+}
+
+// ---------------------------------------------------------------------------
+// Mutations (the L1/L2/L3 core)
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute the next note text for a mutation.
+ */
+export function computeNextText(kind, current, opts) {
+  if (kind === 'create') {
+    const fm = renderFrontmatter(opts.frontmatter ?? {})
+    return { nextText: fm + String(opts.content ?? ''), changed: true }
+  }
+  if (kind === 'update') {
+    const hasContent = opts.content !== undefined && opts.content !== null
+    const hasFmEdit = Object.keys(opts.frontmatterUpdates ?? {}).length > 0 || (opts.frontmatterDeletes ?? []).length > 0
+    if (hasContent) {
+      const fm = renderFrontmatter(opts.frontmatter ?? null)
+      return { nextText: fm + String(opts.content), changed: true }
+    }
+    if (hasFmEdit) {
+      return applyFrontmatterEdit(current, opts.frontmatterUpdates, opts.frontmatterDeletes)
+    }
+    throw new SafeError('update requires content, frontmatterUpdates or frontmatterDeletes', 'INVALID_ARGS')
+  }
+  const addition = String(opts.content ?? '')
+  if (addition === '') return { nextText: current, changed: false }
+  let nextText
+  if (opts.section !== undefined && opts.section !== null && opts.section !== '') {
+    const anchor = '## ' + opts.section
+    const idx = current.indexOf(anchor)
+    if (idx === -1) {
+      nextText = current.endsWith('\n') ? current + anchor + '\n\n' + addition : current + '\n\n' + anchor + '\n\n' + addition
+    } else {
+      const afterAnchor = current.indexOf('\n## ', idx + anchor.length)
+      const insertAt = afterAnchor === -1 ? current.length : afterAnchor
+      const head = current.slice(0, insertAt).replace(/\n+$/, '\n\n')
+      const tail = current.slice(insertAt)
+      nextText = head + addition + (tail === '' || tail.startsWith('\n') ? '' : '\n') + tail
+    }
+  } else {
+    nextText = current.endsWith('\n') ? current + addition : current + '\n\n' + addition
+  }
+  return { nextText, changed: nextText !== current }
+}
+
+/**
+ * The single mutation pipeline every write tool funnels through.
+ *
+ * Flow: boundary → read → plan (dry-run) → approval callback → journal
+ * (planned) → guarded atomic write → journal (done). A stale guard reports a
+ * conflict and never touches the file.
+ */
+export async function mutateNote(fs, host, vault, opts) {
+  const { rel: relPath, kind } = opts
+  const loc = await resolveNotePath(fs, vault, relPath, opts.excludes)
+  const statInfo = await fs.stat(loc.target)
+  const exists = statInfo !== undefined
+
+  if (kind === 'create' && exists) {
+    return { ok: false, action: 'conflict', path: relPath, message: 'note already exists; use update' }
+  }
+  if (kind !== 'create' && !exists) {
+    return { ok: false, action: 'error', path: relPath, message: 'note does not exist' }
+  }
+
+  const current = exists ? await fs.readText(loc.target) : ''
+  if (exists && current.length > WRITE_SIZE_LIMIT) {
+    return { ok: false, action: 'error', path: relPath, message: 'note exceeds the size limit' }
+  }
+  const currentHash = exists ? sha256(current) : null
+  const { nextText, changed } = computeNextText(kind, current, opts)
+  const nextHash = sha256(nextText)
+  const beforeHash = kind === 'create' ? null : currentHash
+
+  const plan = {
+    tool: opts.tool ?? 'obsidian_mutate',
+    path: relPath,
+    kind,
+    beforeHash,
+    afterHash: changed ? nextHash : beforeHash,
+    before: kind === 'create' ? null : current,
+    after: changed ? nextText : current,
+    changed,
+    size: nextText.length,
+  }
+
+  if (plan.size > WRITE_SIZE_LIMIT) {
+    return { ok: false, action: 'error', path: relPath, message: 'resulting note exceeds the size limit' }
+  }
+  if (!plan.changed) return { ok: true, action: 'skip', path: relPath, opId: null, message: 'no change needed' }
+
+  if (opts.dryRun === true) {
+    return { ok: true, action: 'dry-run', path: relPath, plan }
+  }
+
+  // L2: approval gate (fail closed)
+  const outcome = await (opts.onApprove ?? (async () => 'unavailable'))(plan)
+  if (outcome !== 'allowed-once') {
+    return { ok: false, action: 'denied', path: relPath, outcome, message: 'approval outcome: ' + outcome }
+  }
+
+  // L3: journal BEFORE the change (status planned)
+  const opId = journalEntryId()
+  const entry = {
+    opId,
+    ts: monotonicNow(),
+    sessionId: opts.sessionId ?? null,
+    tool: plan.tool,
+    path: relPath,
+    kind,
+    status: 'planned',
+    beforeHash,
+    before: kind === 'create' ? null : current,
+    afterHash: null,
+    args: { ...(opts.argsSanitized ?? {}) },
+  }
+  await writeJournalEntry(fs, vault, entry)
+
+  try {
+    // Guard against the version the model SAW (baseVersion from obsidian_read),
+    // falling back to the just-statted version (read-now-write-now race guard).
+    // create on an absent file has no version to guard (createIfAbsent is the guard).
+    const guardVersion = kind === 'create' ? undefined : (opts.baseVersion ?? statInfo.version)
+    const intent = kind === 'create'
+      ? { kind: 'createIfAbsent' }
+      : { kind: 'replaceIfVersion', version: guardVersion }
+    const outcomeWrite = await fs.writeText(loc.target, nextText, intent)
+    entry.status = 'done'
+    entry.afterHash = nextHash
+    entry.before = outcomeWrite.before ?? entry.before
+    entry.after = outcomeWrite.after
+    await updateJournalEntry(fs, vault, entry)
+    await pruneJournal(fs, host, vault, opts.journalRetentionDays ?? 30)
+    return {
+      ok: true,
+      action: kind,
+      path: relPath,
+      opId,
+      beforeHash,
+      afterHash: nextHash,
+      message: kind + ' committed (opId ' + opId + ')',
+    }
+  } catch (err) {
+    if (err?.code === 'FS_STALE_VERSION' || err?.code === 'FS_NOT_OBSERVED') {
+      return {
+        ok: false,
+        action: 'conflict',
+        path: relPath,
+        opId,
+        message: 'file changed since it was read; nothing was written (re-read and retry)',
+      }
+    }
+    throw err
+  }
+}
+
+/**
+ * Delete = move to trash (never unlink). Host-side rename, guarded by the
+ * same boundary check; the move stays inside the vault.
+ */
+export async function deleteNote(fs, host, vault, opts) {
+  const { rel: relPath } = opts
+  const loc = await resolveNotePath(fs, vault, relPath, opts.excludes)
+  const statInfo = await fs.stat(loc.target)
+  if (statInfo === undefined) {
+    return { ok: false, action: 'error', path: relPath, message: 'note does not exist' }
+  }
+  const current = await fs.readText(loc.target)
+  const beforeHash = sha256(current)
+  const plan = {
+    tool: 'obsidian_note_delete',
+    path: relPath,
+    kind: 'delete',
+    beforeHash,
+    afterHash: null,
+    before: current,
+    after: null,
+    changed: true,
+    size: current.length,
+  }
+  if (opts.dryRun === true) return { ok: true, action: 'dry-run', path: relPath, plan }
+  const outcome = await (opts.onApprove ?? (async () => 'unavailable'))(plan)
+  if (outcome !== 'allowed-once') {
+    return { ok: false, action: 'denied', path: relPath, outcome, message: 'approval outcome: ' + outcome }
+  }
+
+  const opId = journalEntryId()
+  const trashRel = trashRelPath(relPath, opId)
+  const entry = {
+    opId,
+    ts: monotonicNow(),
+    sessionId: opts.sessionId ?? null,
+    tool: plan.tool,
+    path: relPath,
+    kind: 'delete',
+    status: 'planned',
+    beforeHash,
+    before: current,
+    afterHash: null,
+    trashRel,
+    args: { ...(opts.argsSanitized ?? {}) },
+  }
+  await writeJournalEntry(fs, vault, entry)
+  const trashAbs = vault.vaultAbs + '/' + trashRel
+  await host.mkdirP(trashAbs.slice(0, trashAbs.lastIndexOf('/')))
+  await host.rename(loc.abs, trashAbs)
+  entry.status = 'done'
+  await updateJournalEntry(fs, vault, entry)
+  await pruneJournal(fs, host, vault, opts.journalRetentionDays ?? 30)
+  return { ok: true, action: 'delete', path: relPath, opId, trashRel, beforeHash, afterHash: null, message: 'moved to trash (opId ' + opId + ')' }
+}
+
+// ---------------------------------------------------------------------------
+// Rollback (L4)
+// ---------------------------------------------------------------------------
+
+/**
+ * Roll back one journal entry (by opId) or the latest done entry for a path
+ * (undo). Inverse ops are themselves journaled (kind undo/rollback) so every
+ * rollback is re-doable.
+ */
+export async function rollbackEntry(fs, host, vault, { relPath, opId, journalRetentionDays = 30, sessionId }) {
+  const entry = opId !== undefined
+    ? await journalEntry(fs, vault, opId)
+    : await latestDoneEntry(fs, vault, relPath)
+  if (entry === null || entry === undefined) {
+    return { ok: true, action: 'noop', message: 'no journal entry to roll back' }
+  }
+  const undoKind = opId !== undefined ? 'rollback' : 'undo'
+  const targetRel = entry.path
+  const loc = await resolveNotePath(fs, vault, targetRel, DEFAULT_EXCLUDES)
+  const statInfo = await fs.stat(loc.target)
+  const current = statInfo === undefined ? null : await fs.readText(loc.target)
+  const currentHash = current === null ? null : sha256(current)
+
+  // Never clobber concurrent changes: the file must still be exactly what the
+  // entry produced (update/append) or absent (create/delete).
+  if (entry.kind === 'delete') {
+    if (current !== null) {
+      return { ok: false, action: 'conflict', path: targetRel, message: 'file exists at the deleted path (someone recreated it); manual review required' }
+    }
+  } else if (currentHash !== entry.afterHash) {
+    return {
+      ok: false,
+      action: 'conflict',
+      path: targetRel,
+      message: 'file changed after the recorded operation; refusing to roll back (compare manually or undo a newer entry first)',
+    }
+  }
+
+  const rollbackOpId = journalEntryId()
+  const rollbackEntryBase = {
+    opId: rollbackOpId,
+    ts: monotonicNow(),
+    sessionId: sessionId ?? null,
+    tool: undoKind === 'undo' ? 'obsidian_undo' : 'obsidian_rollback',
+    path: targetRel,
+    kind: undoKind,
+    status: 'planned',
+    beforeHash: currentHash,
+    before: current,
+    afterHash: null,
+    targetOpId: entry.opId,
+    args: { opId: entry.opId },
+  }
+  await writeJournalEntry(fs, vault, rollbackEntryBase)
+
+  let message
+  if (entry.kind === 'create') {
+    const trashAbs = vault.vaultAbs + '/' + trashRelPath(targetRel, rollbackOpId)
+    await host.mkdirP(trashAbs.slice(0, trashAbs.lastIndexOf('/')))
+    await host.rename(loc.abs, trashAbs)
+    rollbackEntryBase.afterHash = null
+    rollbackEntryBase.after = null
+    message = 'create undone (note moved to trash)'
+  } else if (entry.kind === 'delete') {
+    const trashAbs = vault.vaultAbs + '/' + entry.trashRel
+    await host.rename(trashAbs, loc.abs)
+    rollbackEntryBase.afterHash = entry.beforeHash
+    rollbackEntryBase.after = entry.before
+    message = 'delete undone (note restored from trash)'
+  } else {
+    const beforeText = entry.before ?? ''
+    const intent = statInfo === undefined
+      ? { kind: 'createIfAbsent' }
+      : { kind: 'replaceIfVersion', version: statInfo.version }
+    const outcomeWrite = await fs.writeText(loc.target, beforeText, intent)
+    rollbackEntryBase.afterHash = sha256(beforeText)
+    rollbackEntryBase.after = outcomeWrite.after
+    message = 'content restored to the pre-operation image'
+  }
+  rollbackEntryBase.status = 'done'
+  await updateJournalEntry(fs, vault, rollbackEntryBase)
+  await pruneJournal(fs, host, vault, journalRetentionDays)
+  return { ok: true, action: undoKind, path: targetRel, opId: rollbackOpId, message }
+}
+
+/**
+ * Restore a previously deleted note from trash (explicit restore tool).
+ */
+export async function restoreFromTrash(fs, host, vault, { relPath, sessionId }) {
+  const rel = sanitizeRelPath(relPath)
+  const entries = await listJournal(fs, vault, { relPath: rel, limit: 200 })
+  const deleted = entries.find((e) => e.kind === 'delete' && e.status === 'done' && e.trashRel !== undefined)
+  if (deleted === undefined) return { ok: false, action: 'error', path: rel, message: 'no deletion record for this path' }
+  const loc = await resolveNotePath(fs, vault, rel, DEFAULT_EXCLUDES)
+  const statInfo = await fs.stat(loc.target)
+  if (statInfo !== undefined) {
+    return { ok: false, action: 'conflict', path: rel, message: 'a file already exists at this path; restore would clobber it' }
+  }
+  const trashAbs = vault.vaultAbs + '/' + deleted.trashRel
+  const trashInfo = await fs.lstat(trashAbs)
+  if (trashInfo === undefined) {
+    return { ok: false, action: 'error', path: rel, message: 'trash copy is gone (already restored or pruned)' }
+  }
+  await host.rename(trashAbs, loc.abs)
+  const opId = journalEntryId()
+  const entry = {
+    opId,
+    ts: monotonicNow(),
+    sessionId: sessionId ?? null,
+    tool: 'obsidian_restore',
+    path: rel,
+    kind: 'restore',
+    status: 'done',
+    beforeHash: null,
+    before: null,
+    afterHash: deleted.beforeHash,
+    after: deleted.before,
+    targetOpId: deleted.opId,
+    args: { path: rel },
+  }
+  await writeJournalEntry(fs, vault, entry)
+  return { ok: true, action: 'restore', path: rel, opId, message: 'note restored from trash' }
+}
+
+// ---------------------------------------------------------------------------
+// Journal retention
+// ---------------------------------------------------------------------------
+
+/** Prune journal day-directories older than retentionDays. */
+export async function pruneJournal(fs, host, vault, retentionDays) {
+  if (retentionDays === undefined || retentionDays === null) return
+  const root = await fs.resolve(vault.vaultAbs + '/' + JOURNAL_DIR)
+  const days = await safeListDir(fs, root)
+  const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000
+  for (const day of days ?? []) {
+    if (day.type !== 'directory') continue
+    const ts = new Date(day.name + 'T00:00:00').getTime()
+    if (Number.isFinite(ts) && ts < cutoff && typeof host.rmrf === 'function') {
+      await host.rmrf(fs.processPath(day.target))
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Batch (M1: sequential, per-op journal & approval)
+// ---------------------------------------------------------------------------
+
+/**
+ * Overlay fs for batch dry-run: projects earlier ops onto reads/stat/write so
+ * a create + append sequence previews against the would-be state. Writes land
+ * in the overlay instead of disk; deletes are recorded by the caller.
+ */
+function overlayFs(fs, overlay) {
+  return {
+    resolve: (p, o) => fs.resolve(p, o),
+    processPath: (t) => fs.processPath(t),
+    lstat: async (p, ...rest) => {
+      if (overlay.has(p)) {
+        const v = overlay.get(p)
+        return v === null ? undefined : { type: 'file', size: v.length }
+      }
+      return fs.lstat(p, ...rest)
+    },
+    stat: async (t) => {
+      const p = t.targetKey
+      if (overlay.has(p)) {
+        const v = overlay.get(p)
+        return v === null ? undefined : { version: 'overlay', type: 'file', size: v.length }
+      }
+      return fs.stat(t)
+    },
+    contains: (a, b) => fs.contains(a, b),
+    readText: async (t) => {
+      const p = t.targetKey
+      if (overlay.has(p)) {
+        const v = overlay.get(p)
+        if (v === null) throw new Error('ENOENT: ' + p)
+        return v
+      }
+      return fs.readText(t)
+    },
+    listDir: (t, s) => fs.listDir(t, s),
+    writeText: async (t, content, expected) => {
+      const p = t.targetKey
+      let cur = null
+      if (overlay.has(p)) cur = overlay.get(p)
+      else {
+        const info = await fs.stat(t)
+        if (info !== undefined) cur = await fs.readText(t)
+      }
+      if (expected !== undefined && expected.kind === 'createIfAbsent' && cur !== null) {
+        const err = new Error('FS_NOT_OBSERVED: target exists')
+        err.code = 'FS_NOT_OBSERVED'
+        throw err
+      }
+      overlay.set(p, content)
+      return { operation: cur === null ? 'create' : 'update', version: 'overlay', before: cur, after: content }
+    },
+  }
+}
+
+/**
+ * Run a batch: each op goes through the normal pipeline with its own journal
+ * entry. A failed op aborts the batch and reports what ran. dryRun projects
+ * earlier ops through an overlay so dependent sequences preview correctly.
+ */
+export async function batchMutate(fs, host, vault, { ops = [], dryRun = false, sessionId, onApprove, excludes, journalRetentionDays }) {
+  if (!Array.isArray(ops) || ops.length === 0) {
+    throw new SafeError('batch requires at least one operation', 'INVALID_ARGS')
+  }
+  const overlay = new Map()
+  const effectiveFs = dryRun ? overlayFs(fs, overlay) : fs
+  const results = []
+  for (const op of ops) {
+    const { action, path, ...rest } = op
+    let res
+    if (action === 'delete') {
+      res = await deleteNote(effectiveFs, host, vault, { ...rest, rel: path, sessionId, onApprove, excludes, journalRetentionDays, dryRun })
+      if (dryRun && res.ok) overlay.set(vault.vaultAbs + '/' + path, null)
+    } else if (action === 'create' || action === 'update' || action === 'append') {
+      res = await mutateNote(effectiveFs, host, vault, { ...rest, rel: path, kind: action, tool: 'obsidian_batch:' + action, sessionId, onApprove, excludes, journalRetentionDays, dryRun })
+      if (dryRun && res.ok && res.action === 'dry-run' && res.plan !== undefined) {
+        overlay.set(vault.vaultAbs + '/' + path, res.plan.after ?? '')
+      }
+    } else {
+      res = { ok: false, action: 'error', message: 'unknown batch op: ' + action }
+    }
+    results.push(res)
+    if (!res.ok && !dryRun) {
+      return { ok: false, results, message: 'batch aborted at op ' + (results.length - 1) + ': ' + res.message }
+    }
+  }
+  return { ok: true, results }
+}

@@ -1,0 +1,51 @@
+{
+  "name": "dsh-obsidian-channel",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness (DSH) plugin: native Obsidian vault channel — write-side tools (create/update/append/delete/batch) with approval gate, change journal, and byte-level rollback (undo/rollback/restore).",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": {
+      "default": "./src/index.js"
+    },
+    "./engine": {
+      "default": "./src/engine.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src/",
+    "cordis.patch.yml"
+  ],
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "obsidian",
+    "vault",
+    "rollback",
+    "journal",
+    "approval"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": ">=0.1.0-rc.6 <1",
+    "@deepseek-ai/dsh-fs": ">=0.1.0-rc.6 <1",
+    "@deepseek-ai/dsh-user-approval": ">=0.1.0-rc.6 <1",
+    "@deepseek-ai/schemastery": "*",
+    "@deepseek-ai/cordis": "*",
+    "dsh-obsidian-export": "*"
+  },
+  "peerDependenciesMeta": {
+    "dsh-obsidian-export": {
+      "optional": true
+    }
+  },
+  "scripts": {
+    "test": "node --test tests/"
+  }
+}
