@@ -5,7 +5,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   sanitizeRelPath, relExcluded, openVault, resolveNotePath, parseNote,
-  renderFrontmatter, applyFrontmatterEdit, mutateNote, deleteNote, batchMutate,
+  renderFrontmatter, applyFrontmatterEdit, computeNextText,
+  mutateNote, deleteNote, batchMutate,
   listJournal, latestDoneEntry, rollbackEntry, restoreFromTrash,
 } from '../src/engine.js'
 
@@ -237,6 +238,31 @@ test('applyFrontmatterEdit preserves every untouched byte exactly', () => {
   const same = applyFrontmatterEdit(original, {}, [])
   assert.equal(same.text, original)
   assert.equal(same.changed, false)
+})
+
+test('computeNextText: update with identical content reports no change', () => {
+  // Regression: the update branch used to hardcode changed=true, so a
+  // byte-identical update went through approval and journaled a fake commit.
+  const current = 'just text, no title'
+  const up = computeNextText('update', current, { content: 'just text, no title' })
+  assert.equal(up.nextText, current)
+  assert.equal(up.changed, false)
+
+  const changed = computeNextText('update', current, { content: 'different' })
+  assert.equal(changed.changed, true)
+
+  const withFm = computeNextText('update', current, { content: 'x', frontmatter: { tags: ['a'] } })
+  assert.equal(withFm.nextText, '---\ntags: [a]\n---\nx')
+  assert.equal(withFm.changed, true)
+
+  // append of empty content is a no-op
+  const ap = computeNextText('append', current, { content: '' })
+  assert.equal(ap.nextText, current)
+  assert.equal(ap.changed, false)
+
+  // create always reports changed (guarded upstream by the exists check)
+  const cr = computeNextText('create', '', { content: 'x' })
+  assert.equal(cr.changed, true)
 })
 
 // ---------------------------------------------------------------------------

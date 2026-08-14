@@ -31,6 +31,23 @@ async function vaultOf(ctx, args) {
   return openVault(ctx.fs, dir)
 }
 
+/** Drop null/undefined fields so optional schema properties never violate
+ *  their declared types (the harness rejects `title: null` for `type: string`).
+ *  The journal keeps the full image; this only shapes the model-facing result. */
+function cleanNulls(value) {
+  if (value === null || value === undefined) return undefined
+  if (Array.isArray(value)) return value.map(cleanNulls)
+  if (typeof value === 'object') {
+    const out = {}
+    for (const [k, v] of Object.entries(value)) {
+      if (v === null || v === undefined) continue
+      out[k] = typeof v === 'object' ? cleanNulls(v) : v
+    }
+    return out
+  }
+  return value
+}
+
 /** Sanitize a value that must serialize to JSON for journal args. */
 function jsonSafe(value) {
   try {
@@ -82,12 +99,13 @@ export function registerObsidianChannelTools(ctx, config, makeApprover) {
   })
 
   const sizeOutcome = (res) => {
-    // Drop bulky before/after images from model-facing results (journal keeps them).
+    // Drop bulky before/after images from model-facing results (journal keeps them),
+    // then strip null/undefined fields so optional schema props stay type-valid.
     if (res.plan !== undefined) {
       const { before, after, ...rest } = res.plan
-      return { ...res, plan: rest }
+      return cleanNulls({ ...res, plan: rest })
     }
-    return res
+    return cleanNulls(res)
   }
 
   // ---- obsidian_read (returns the fs version token for guarded updates) ----
@@ -111,6 +129,7 @@ export function registerObsidianChannelTools(ctx, config, makeApprover) {
         properties: {
           ok: { type: 'boolean', required: true },
           action: { type: 'string', required: true },
+          code: { type: 'string' },
           path: { type: 'string' },
           version: { type: 'string' },
           hash: { type: 'string' },
@@ -133,7 +152,7 @@ export function registerObsidianChannelTools(ctx, config, makeApprover) {
         if ((statInfo.size ?? 0) > READ_SIZE_LIMIT) return errTurn('note exceeds the read size limit', 'SIZE_LIMIT')
         const text = await ctx.fs.readText(loc.target, exec.signal)
         const parsed = parseNote(text)
-        return {
+        return cleanNulls({
           ok: true,
           action: 'read',
           path: loc.rel,
@@ -144,7 +163,7 @@ export function registerObsidianChannelTools(ctx, config, makeApprover) {
           wikilinks: parsed.wikilinks,
           frontmatter: parsed.frontmatter ?? null,
           body: parsed.body,
-        }
+        })
       } catch (err) {
         return errTurn(err instanceof SafeError ? err.message : String(err?.message ?? err))
       }
@@ -168,6 +187,7 @@ export function registerObsidianChannelTools(ctx, config, makeApprover) {
           properties: {
             ok: { type: 'boolean', required: true },
             action: { type: 'string', required: true },
+            code: { type: 'string' },
             path: { type: 'string' },
             opId: { type: 'string' },
             beforeHash: { type: 'string' },
@@ -266,6 +286,7 @@ export function registerObsidianChannelTools(ctx, config, makeApprover) {
         properties: {
           ok: { type: 'boolean', required: true },
           action: { type: 'string', required: true },
+          code: { type: 'string' },
           path: { type: 'string' },
           opId: { type: 'string' },
           beforeHash: { type: 'string' },
@@ -319,6 +340,7 @@ export function registerObsidianChannelTools(ctx, config, makeApprover) {
       schema: { type: 'object', additionalProperties: false, properties: {
         ok: { type: 'boolean', required: true },
         action: { type: 'string', required: true },
+        code: { type: 'string' },
         results: { type: 'array', items: { type: 'object', additionalProperties: true } },
         message: { type: 'string' },
       } },
@@ -327,14 +349,14 @@ export function registerObsidianChannelTools(ctx, config, makeApprover) {
     async execute(args, exec) {
       try {
         const vault = await vaultOf(ctx, args)
-        return await batchMutate(ctx.fs, host, vault, {
+        return cleanNulls(await batchMutate(ctx.fs, host, vault, {
           ops: args.ops ?? [],
           dryRun: args.dryRun === true,
           sessionId: sessionIdOf(exec),
           excludes: config.excludes,
           journalRetentionDays: config.journalRetentionDays,
           onApprove: (plan) => makeApprover(ctx, exec, plan.tool ?? 'obsidian_batch', plan),
-        })
+        }))
       } catch (err) {
         return errTurn(err instanceof SafeError ? err.message : String(err?.message ?? err))
       }
@@ -356,6 +378,7 @@ export function registerObsidianChannelTools(ctx, config, makeApprover) {
         schema: { type: 'object', additionalProperties: false, properties: {
           ok: { type: 'boolean', required: true },
           action: { type: 'string', required: true },
+          code: { type: 'string' },
           path: { type: 'string' },
           opId: { type: 'string' },
           message: { type: 'string' },
@@ -368,7 +391,7 @@ export function registerObsidianChannelTools(ctx, config, makeApprover) {
           const res = opIdMode
             ? await rollbackEntry(ctx.fs, host, vault, { opId: args.opId, sessionId: sessionIdOf(exec), journalRetentionDays: config.journalRetentionDays })
             : await rollbackEntry(ctx.fs, host, vault, { relPath: args.path, sessionId: sessionIdOf(exec), journalRetentionDays: config.journalRetentionDays })
-          return res
+          return cleanNulls(res)
         } catch (err) {
           return errTurn(err instanceof SafeError ? err.message : String(err?.message ?? err))
         }
@@ -405,6 +428,7 @@ export function registerObsidianChannelTools(ctx, config, makeApprover) {
       schema: { type: 'object', additionalProperties: false, properties: {
         ok: { type: 'boolean', required: true },
         action: { type: 'string', required: true },
+        code: { type: 'string' },
         entries: { type: 'array', items: { type: 'object', additionalProperties: true } },
         message: { type: 'string' },
       } },
@@ -425,7 +449,7 @@ export function registerObsidianChannelTools(ctx, config, makeApprover) {
           beforeHash: e.beforeHash ?? null,
           afterHash: e.afterHash ?? null,
         }))
-        return { ok: true, action: 'history', entries: slim }
+        return cleanNulls({ ok: true, action: 'history', entries: slim })
       } catch (err) {
         return errTurn(err instanceof SafeError ? err.message : String(err?.message ?? err))
       }
@@ -447,6 +471,7 @@ export function registerObsidianChannelTools(ctx, config, makeApprover) {
       schema: { type: 'object', additionalProperties: false, properties: {
         ok: { type: 'boolean', required: true },
         action: { type: 'string', required: true },
+        code: { type: 'string' },
         path: { type: 'string' },
         opId: { type: 'string' },
         message: { type: 'string' },
@@ -456,7 +481,7 @@ export function registerObsidianChannelTools(ctx, config, makeApprover) {
     async execute(args, exec) {
       try {
         const vault = await vaultOf(ctx, args)
-        return await restoreFromTrash(ctx.fs, host, vault, { relPath: args.path, sessionId: sessionIdOf(exec) })
+        return cleanNulls(await restoreFromTrash(ctx.fs, host, vault, { relPath: args.path, sessionId: sessionIdOf(exec) }))
       } catch (err) {
         return errTurn(err instanceof SafeError ? err.message : String(err?.message ?? err))
       }

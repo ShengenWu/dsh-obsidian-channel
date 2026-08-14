@@ -356,7 +356,8 @@ export function computeNextText(kind, current, opts) {
     const hasFmEdit = Object.keys(opts.frontmatterUpdates ?? {}).length > 0 || (opts.frontmatterDeletes ?? []).length > 0
     if (hasContent) {
       const fm = renderFrontmatter(opts.frontmatter ?? null)
-      return { nextText: fm + String(opts.content), changed: true }
+      const nextText = fm + String(opts.content)
+      return { nextText, changed: nextText !== current }
     }
     if (hasFmEdit) {
       return applyFrontmatterEdit(current, opts.frontmatterUpdates, opts.frontmatterDeletes)
