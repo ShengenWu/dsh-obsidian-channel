@@ -377,3 +377,49 @@
 - 设计文档（本文档）
 - 测试套件 + 手动验收清单
 - README（中英）+ 安装/使用/安全说明
+
+---
+
+## 14. M1 实机验收记录（2026-08-14，rc.6 + 真实 vault）
+
+实机安装（dsh plugin --profile web add 本地路径，node_modules 为符号链接直指
+仓库，改代码后仅需重启 web 即生效）。验收 vault：/Users/shengen/obsidian。
+
+### 14.1 已通过项
+
+| 项 | 结果 |
+|---|---|
+| 10 个工具注册（本轮会话工具列表可见 obsidian_* 全家） | ✅ |
+| 真实 vault 读取（fs seam 直连真库，frontmatter 解析成功） | ✅ |
+| dryRun plan 预览：真实 vault、不触发审批、schema 校验通过 | ✅ |
+| 真实写入 + 会话审批策略 'never' + writePolicy 'per-write' | ✅ fail-closed：返回 denied/rejected，vault 零触碰（无 journal、无 trash） |
+| 路径越界拦截（../ 逃逸） | ✅（冒烟测试覆盖） |
+
+### 14.2 发现并已修复的三个真机 bug（提交 0b45eb9）
+
+教训：rc.6 harness 在工具调用层对返回结果做 output schema 运行时校验
+（additionalProperties:false + 类型约束），而 stub-fs 冒烟测试直接调用编译后
+的 execute，绕过了这一层——本机唯一能抓到这类 bug 的是实机调用。
+
+1. **errTurn 的 code 字段未在 schema 声明** → 全部 10 个工具的错误路径都因
+   `value.code is not a declared property` 被 harness 拒绝。修复：7 处 output
+   schema 声明 `code: string`。
+2. **可选字段返回 null**（read 无 H1/frontmatter 时 title/frontmatter=null；
+   skip 的 opId=null；create 的 beforeHash=null；delete 的 afterHash=null）→
+   `must be a string/object` 违规。修复：工具边界 cleanNulls() 剥离 null/undefined
+   （journal 保留完整前像，不影响回滚）。
+3. **computeNextText 的 update 分支硬编码 changed=true** → 字节相同的 update
+   也会走审批并留一笔假 commit。修复：nextText !== current 比较。
+
+测试加固：smoke.mjs 新增 output schema conformance 检查器（镜像 harness 校验
+器），覆盖错误/拒绝/noop/null/skip 路径；engine.test.mjs 新增 changed 回归用例
+（21/21 绿）。
+
+### 14.3 待重启 web 后复验
+
+- 错误路径返回干净的 {ok:false, code, message}（重启前仍是旧代码，会复现 bug）。
+- 无 H1/无 frontmatter 的笔记读取（cleanNulls 后 title/frontmatter 省略）。
+- 审批卡 UI：需用户把会话审批策略从 'never' 改回 'ask'（'never' 下所有请求
+  直接拒绝——恰好已验证 fail-closed 路径）。
+- 默认 vaultDir 配置持久化：随 M2 设置页交付；在此之前 agent 调用需显式传
+  vaultDir（或由用户在 profile cordis.patch.yml 里写 id 覆盖）。
