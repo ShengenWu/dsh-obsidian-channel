@@ -294,6 +294,7 @@
 |---|---|---|
 | M1 安全内核 + 写侧（本设计核心） | journal/回滚引擎、note_create/update/append/delete/batch、undo/history/rollback/restore、审批接入 | 任意写操作可 undo；冲突不覆盖；逃逸路径被拒（全部有单测） |
 | M2 设置页 + 历史面板 | vault/策略配置、变更历史+一键回滚 UI | 浏览器里能配好 vault 并回滚一笔真实变更 |
+| （M2 已实现，2026-08-14 提交 b7cf841；实机验收待 web 重启后执行） | settings.section 页（settingsScope 配置 + /obsidian RPC 历史面板） | 同左 |
 | M3 daily/模板/图侧 | daily、templates、graph、moc | 按模板建卡、生成周报、断链报告可用 |
 | M4 composer + skills + 文档 | [[ 补全、引用注入、5 个 skill、README/zh | 输入框补全可用；skill 走查通过 |
 
@@ -423,3 +424,27 @@
   直接拒绝——恰好已验证 fail-closed 路径）。
 - 默认 vaultDir 配置持久化：随 M2 设置页交付；在此之前 agent 调用需显式传
   vaultDir（或由用户在 profile cordis.patch.yml 里写 id 覆盖）。
+
+---
+
+## 15. M2 实现记录（2026-08-14，提交 b7cf841）
+
+### 15.1 接线全景（全部官方 seam，无 fork）
+
+| 能力 | 机制 |
+|---|---|
+| 配置表单（host） | installSettingsSection：Config 注册为 'dsh-obsidian-channel' settings namespace，组合 entry 作 base 层；工具/审批适配器经 source thunk 按调用读取 → 设置页写入即时生效 |
+| 配置读写（client） | ctx.settingsScope.bind → getSnapshot/subscribe/set（settings.mutate RPC 落盘 settings.yaml） |
+| 历史面板数据通道 | ctx.connection.rpc.handle('/obsidian')（host，authority loopback）↔ ctx.connection.rpc.call（client）；端点 history/list · history/entry（before/after 全文）· history/rollback · vault/check |
+| 面板回滚语义 | 直接执行不审批：ctx.approval 要求 agent + open turn，UI 点击两者皆无；按钮点击即用户授权，且回滚自身留痕可再撤 |
+| 页面注册 | settings.section slot（id dsh-obsidian-channel，label 为 locale thunk）；zh/en 词典经 ctx.locale.register |
+| client 打包 | tsdown → lib/client.js（CJS + window.__ModuleLoader__.load 契约；react/jsx-runtime external）；dsh.client {platform web} + exports[\"./client\"] 被发现 |
+
+### 15.2 关键裁决（对照子代理调研）
+
+- 数据通道选 ctx.connection.rpc.handle 而非 ctx.webServer 裸路由：前者是
+  transport 级通用逻辑通道 seam（/api 频道本身即建于其上），自带 loopback
+  信任栅与信封校验，代码更少。RpcMethodMap 封闭只影响 /api 域，不影响自建
+  通道。
+- rollback 不走 ctx.approval（见上）；writePolicy 只约束 agent 工具路径。
+- 面板先落在设置页内（DESIGN §6 原案）；sidebar.footer.action 触发器留作后续。
