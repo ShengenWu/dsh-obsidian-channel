@@ -2,8 +2,12 @@
 
 DeepSeek Harness (DSH) 插件：把 Obsidian vault 变成 agent 可安全写入的知识库。
 
-M1（当前阶段）：安全内核 + 写侧 + 回滚。所有写操作有审批门、有变更日志
+M1：安全内核 + 写侧 + 回滚 —— 所有写操作有审批门、有变更日志
 （journal）、可字节级回滚；冲突时永不静默覆盖。
+
+M2：设置页 + 变更历史面板 —— Web 设置页（Settings → Obsidian）里配置 vault
+与审批策略（写后即时生效，落盘重启不丢），变更历史面板逐笔看 before→after
+diff、一键回滚（回滚本身也留痕，可再撤）。
 
 ## 能力（M1）
 
@@ -35,8 +39,15 @@ M1（当前阶段）：安全内核 + 写侧 + 回滚。所有写操作有审批
 
     dsh plugin --profile web add <本仓库路径或 git 地址>
 
-然后重启 dsh web。Settings 里（M2 阶段会有图形设置页；当前阶段用
-cordis 配置）：
+然后重启 dsh web。
+
+**M2 图形设置**：打开 Settings → Obsidian 页，直接配置 Vault 根目录、
+写入审批策略、排除目录、journal 保留天数（写后即时生效；完整配置表单
+同时出现在 Settings → Plugins → dsh-obsidian-channel）。同一页面下方即
+「变更历史」面板：按时间倒序列出每笔变更，点击展开 before→after diff，
+一键回滚。
+
+无图形界面时也可用 cordis 配置：
 
     - id: dsh-obsidian-channel
       config:
@@ -47,9 +58,15 @@ cordis 配置）：
 
 ## 开发与测试
 
-    node --test tests/engine.test.mjs   # 20 个安全内核单测（内存 fs，无依赖）
+    node --test tests/engine.test.mjs   # 21 个安全内核单测（内存 fs，无依赖）
     node tests/smoke.mjs               # 真实 rc.6 dsh-tools/schemastery 全链路冒烟
-                                       # （需先按 scripts/link-runtime.sh 建立符号链接）
+                                       # （含 M2 settings/RPC 接线断言；需先按
+                                       #   scripts/link-runtime.sh 建立符号链接）
+    npm run build                      # 构建 client 半（tsdown → lib/client.js）
+
+client 半是官方 bundle client 通道（package.json 的 dsh.client +
+exports["./client"]，产物 lib/client.js，运行时经 window.__ModuleLoader__
+加载）；host 半纯 JS 零构建。
 
 ## 与 dsh-obsidian-export 的关系
 
@@ -59,8 +76,8 @@ version 令牌，是守卫写操作的前提。
 
 ## 路线图
 
-- M1 ✅ 安全内核 + 写侧 + 回滚（本阶段）
-- M2 设置页 + 变更历史面板（Web 端一键回滚）
+- M1 ✅ 安全内核 + 写侧 + 回滚
+- M2 ✅ 设置页 + 变更历史面板（Settings → Obsidian；diff + 一键回滚）
 - M3 daily/模板/图侧（断链/孤儿/MOC）
 - M4 composer 双链补全 + 知识工作流 skills
 

@@ -25,9 +25,9 @@ function textBlock(text) {
   return [{ type: 'text', text }]
 }
 
-/** Resolve vaultDir argument or throw a SafeError. */
-async function vaultOf(ctx, args) {
-  const dir = args.vaultDir ?? ctx.config?.vaultDir ?? ''
+/** Resolve vaultDir argument (or the live plugin config default) and open the vault. */
+async function vaultOf(ctx, getConfig, args) {
+  const dir = args.vaultDir ?? getConfig().vaultDir ?? ''
   return openVault(ctx.fs, dir)
 }
 
@@ -58,7 +58,7 @@ function jsonSafe(value) {
 }
 
 /** Host-side adapter for trash moves (fs seam has no remove/move). */
-function hostOf() {
+export function hostOf() {
   return {
     rename: async (from, to) => {
       const { rename } = await import('node:fs/promises')
@@ -79,7 +79,7 @@ function hostOf() {
 // Registry
 // ---------------------------------------------------------------------------
 
-export function registerObsidianChannelTools(ctx, config, makeApprover) {
+export function registerObsidianChannelTools(ctx, getConfig, makeApprover) {
   const host = hostOf()
   const sessionIdOf = (exec) => (typeof exec.agent?.session?.id === 'string' ? exec.agent.session.id : null)
 
@@ -145,8 +145,8 @@ export function registerObsidianChannelTools(ctx, config, makeApprover) {
     },
     async execute(args, exec) {
       try {
-        const vault = await vaultOf(ctx, args)
-        const loc = await resolveNotePath(ctx.fs, vault, args.path, config.excludes)
+        const vault = await vaultOf(ctx, getConfig, args)
+        const loc = await resolveNotePath(ctx.fs, vault, args.path, getConfig().excludes)
         const statInfo = await ctx.fs.stat(loc.target)
         if (statInfo === undefined) return errTurn('note does not exist: ' + loc.rel, 'NOT_FOUND')
         if ((statInfo.size ?? 0) > READ_SIZE_LIMIT) return errTurn('note exceeds the read size limit', 'SIZE_LIMIT')
@@ -205,7 +205,7 @@ export function registerObsidianChannelTools(ctx, config, makeApprover) {
       },
       async execute(args, exec) {
         try {
-          const vault = await vaultOf(ctx, args)
+          const vault = await vaultOf(ctx, getConfig, args)
           const res = await mutateNote(ctx.fs, host, vault, {
             rel: args.path,
             kind,
@@ -218,8 +218,8 @@ export function registerObsidianChannelTools(ctx, config, makeApprover) {
             baseVersion: args.baseVersion,
             dryRun: args.dryRun === true,
             sessionId: sessionIdOf(exec),
-            excludes: config.excludes,
-            journalRetentionDays: config.journalRetentionDays,
+            excludes: getConfig().excludes,
+            journalRetentionDays: getConfig().journalRetentionDays,
             argsSanitized: jsonSafe(args),
             onApprove: (plan) => makeApprover(ctx, exec, toolName, plan),
           })
@@ -300,13 +300,13 @@ export function registerObsidianChannelTools(ctx, config, makeApprover) {
     },
     async execute(args, exec) {
       try {
-        const vault = await vaultOf(ctx, args)
+        const vault = await vaultOf(ctx, getConfig, args)
         const res = await deleteNote(ctx.fs, host, vault, {
           rel: args.path,
           dryRun: args.dryRun === true,
           sessionId: sessionIdOf(exec),
-          excludes: config.excludes,
-          journalRetentionDays: config.journalRetentionDays,
+          excludes: getConfig().excludes,
+          journalRetentionDays: getConfig().journalRetentionDays,
           argsSanitized: jsonSafe(args),
           onApprove: (plan) => makeApprover(ctx, exec, 'obsidian_note_delete', plan),
         })
@@ -348,13 +348,13 @@ export function registerObsidianChannelTools(ctx, config, makeApprover) {
     },
     async execute(args, exec) {
       try {
-        const vault = await vaultOf(ctx, args)
+        const vault = await vaultOf(ctx, getConfig, args)
         return cleanNulls(await batchMutate(ctx.fs, host, vault, {
           ops: args.ops ?? [],
           dryRun: args.dryRun === true,
           sessionId: sessionIdOf(exec),
-          excludes: config.excludes,
-          journalRetentionDays: config.journalRetentionDays,
+          excludes: getConfig().excludes,
+          journalRetentionDays: getConfig().journalRetentionDays,
           onApprove: (plan) => makeApprover(ctx, exec, plan.tool ?? 'obsidian_batch', plan),
         }))
       } catch (err) {
@@ -387,10 +387,10 @@ export function registerObsidianChannelTools(ctx, config, makeApprover) {
       },
       async execute(args, exec) {
         try {
-          const vault = await vaultOf(ctx, args)
+          const vault = await vaultOf(ctx, getConfig, args)
           const res = opIdMode
-            ? await rollbackEntry(ctx.fs, host, vault, { opId: args.opId, sessionId: sessionIdOf(exec), journalRetentionDays: config.journalRetentionDays })
-            : await rollbackEntry(ctx.fs, host, vault, { relPath: args.path, sessionId: sessionIdOf(exec), journalRetentionDays: config.journalRetentionDays })
+            ? await rollbackEntry(ctx.fs, host, vault, { opId: args.opId, sessionId: sessionIdOf(exec), journalRetentionDays: getConfig().journalRetentionDays })
+            : await rollbackEntry(ctx.fs, host, vault, { relPath: args.path, sessionId: sessionIdOf(exec), journalRetentionDays: getConfig().journalRetentionDays })
           return cleanNulls(res)
         } catch (err) {
           return errTurn(err instanceof SafeError ? err.message : String(err?.message ?? err))
@@ -436,7 +436,7 @@ export function registerObsidianChannelTools(ctx, config, makeApprover) {
     },
     async execute(args) {
       try {
-        const vault = await vaultOf(ctx, args)
+        const vault = await vaultOf(ctx, getConfig, args)
         const entries = await listJournal(ctx.fs, vault, { relPath: args.path, limit: args.limit ?? 50 })
         const slim = entries.map((e) => ({
           opId: e.opId,
@@ -480,7 +480,7 @@ export function registerObsidianChannelTools(ctx, config, makeApprover) {
     },
     async execute(args, exec) {
       try {
-        const vault = await vaultOf(ctx, args)
+        const vault = await vaultOf(ctx, getConfig, args)
         return cleanNulls(await restoreFromTrash(ctx.fs, host, vault, { relPath: args.path, sessionId: sessionIdOf(exec) }))
       } catch (err) {
         return errTurn(err instanceof SafeError ? err.message : String(err?.message ?? err))

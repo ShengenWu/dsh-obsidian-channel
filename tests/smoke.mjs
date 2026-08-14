@@ -35,18 +35,57 @@ const parsed = Config({ vaultDir: '/vault', writePolicy: 'per-write', excludes: 
 console.log('Config parsed:', JSON.stringify(parsed))
 
 let approvalOutcome = 'allowed-once'
+let approvalCalls = 0
 
 const registered = {}
+
+// --- M2 optional-service stubs (settings seam + connection RPC) ---
+const scopes = {}
+const userSettings = {}
+const channels = {}
+
 const ctx = {
   config: parsed,
   fs,
   tools: { register: (def) => { registered[def.name] = def } },
   approval: {
     request: async (req) => {
+      approvalCalls++
       console.log('approval.request called for', req.toolName, '| reason:', req.reason?.slice(0, 80))
       return approvalOutcome
     },
   },
+  // settings seam (fake provider): resolved = base entry merged with user layer
+  settings: {
+    register: (ns, schema, options) => {
+      const scope = {
+        get: () => ({ ...(options?.base ?? {}), ...(userSettings[ns] ?? {}) }),
+        watch: () => () => {},
+        update: async (patch) => { userSettings[ns] = { ...(userSettings[ns] ?? {}), ...(patch ?? {}) } },
+        replace: async (section) => { userSettings[ns] = { ...(section ?? {}) } },
+      }
+      scopes[ns] = scope
+      return scope
+    },
+    describe: () => [],
+    get: () => undefined,
+  },
+  // connection RPC registry (fake): captures the /obsidian channel handler
+  connection: {
+    rpc: {
+      handle: (channel, handler, options) => {
+        channels[channel] = { handler, options }
+        return async () => {}
+      },
+      intercept: () => async () => {},
+    },
+  },
+  // cordis-style optional inject: run cb when every named service is present
+  inject: (names, cb) => {
+    if (names.every((n) => n in ctx)) cb(ctx)
+  },
+  // cordis fiber effect (fake): no-op disposer registration
+  effect: () => () => {},
 }
 
 apply(ctx, parsed)
@@ -174,6 +213,44 @@ if (denied.ok !== false) throw new Error('traversal not blocked')
   conform(registered['obsidian_note_update'].output.schema, sk, 'update-skip')
   if (sk.ok !== true || sk.action !== 'skip' || 'opId' in sk) throw new Error('update-skip shape wrong: ' + JSON.stringify(sk))
   console.log('update-skip:', JSON.stringify({ ok: sk.ok, action: sk.action, message: sk.message }))
+}
+
+// --- M2 wiring: panel RPC channel + live settings scope ---
+{
+  if (channels['/obsidian'] === undefined) throw new Error('panel RPC channel /obsidian not registered')
+  if (channels['/obsidian'].options.authority !== 'loopback') throw new Error('panel channel must be loopback-only')
+  const rpc = channels['/obsidian'].handler
+
+  const list = await rpc('history/list', { limit: 10 }, undefined)
+  if (list.ok !== true || !Array.isArray(list.value.entries) || list.value.entries.length === 0) throw new Error('history/list failed: ' + JSON.stringify(list))
+  console.log('rpc history/list:', list.value.entries.length, 'entries')
+
+  const entryRes = await rpc('history/entry', { opId: list.value.entries[0].opId }, undefined)
+  if (entryRes.ok !== true || typeof entryRes.value.after !== 'string') throw new Error('history/entry failed: ' + JSON.stringify(entryRes))
+  if (entryRes.value.before !== null && typeof entryRes.value.before !== 'string') throw new Error('history/entry before image must be string or null')
+  console.log('rpc history/entry: ok, after image', entryRes.value.after.length, 'bytes')
+
+  const rollbackRes = await rpc('history/rollback', { opId: undo.opId }, undefined)
+  if (rollbackRes.ok !== true || rollbackRes.value.action === undefined) throw new Error('history/rollback failed: ' + JSON.stringify(rollbackRes))
+  console.log('rpc history/rollback:', JSON.stringify({ ok: rollbackRes.ok, action: rollbackRes.value.action }))
+
+  const check = await rpc('vault/check', {}, undefined)
+  if (check.ok !== true || check.value.vault !== '/vault') throw new Error('vault/check failed: ' + JSON.stringify(check))
+  console.log('rpc vault/check:', JSON.stringify(check.value))
+
+  const bad = await rpc('nope', {}, undefined)
+  if (bad.ok !== false || bad.error.code !== 'internal') throw new Error('unknown endpoint must fail with internal: ' + JSON.stringify(bad))
+  console.log('rpc unknown endpoint: internal error OK')
+
+  // live settings switch: writePolicy auto must skip the approval seam entirely
+  if (scopes['dsh-obsidian-channel'] === undefined) throw new Error('settings namespace not registered')
+  await scopes['dsh-obsidian-channel'].update({ writePolicy: 'auto' })
+  const callsBefore = approvalCalls
+  const autoCreated = await registered['obsidian_note_create'].execute({ vaultDir: '/vault', path: 'Notes/auto.md', content: 'auto' }, exec)
+  if (autoCreated.ok !== true) throw new Error('auto-policy create failed: ' + JSON.stringify(autoCreated))
+  if (approvalCalls !== callsBefore) throw new Error('auto policy must not call the approval seam')
+  await scopes['dsh-obsidian-channel'].update({ writePolicy: 'per-write' })
+  console.log('live settings switch: auto write without approval OK')
 }
 
 console.log('SMOKE OK — all tools register and the full pipeline works against rc.6')
