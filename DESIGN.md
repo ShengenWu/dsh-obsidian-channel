@@ -326,9 +326,12 @@
 | 官方未来原生支持 Obsidian | 本插件保持薄依赖上游 engine，被官方化则平滑退役 |
 | vault 在同步盘（iCloud/坚果云）的文件竞态 | L1 哈希检查已覆盖大部分场景 |
 
-开放问题（待评审确认）：
-1. 包名/仓库归属：建议包名 dsh-obsidian-channel，仓库放 ~/code/dsh-obsidian
-2. 审批实现走官方 permission-presets seam 还是自定义审批卡？（倾向前者，需在 M1 验证 seam 可用性）
+开放问题（2026-08-14 更新）：
+1. ✅ 包名/仓库归属已定：包名 dsh-obsidian-channel，仓库
+   https://github.com/ShengenWu/dsh-obsidian-channel（本地 checkout 在
+   ~/code/dsh-obsidian，为已安装插件的符号链接目标，勿改名）
+2. ✅ 审批走官方 permission seam（ctx.approval）：M1 已实机验证 fail-closed
+   路径（'never' 策略拒绝且 vault 零触碰）；审批卡 UI 待 'ask' 策略下真机复验
 3. 是否需要 alias（Obsidian 别名）解析支持？（建议 M4 后置）
 
 ---

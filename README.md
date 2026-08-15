@@ -37,7 +37,10 @@ diff、一键回滚（回滚本身也留痕，可再撤）。
 
 ## 安装
 
-    dsh plugin --profile web add <本仓库路径或 git 地址>
+    dsh plugin --profile web add github:ShengenWu/dsh-obsidian-channel
+    # 或本地路径（开发时）
+
+仓库：https://github.com/ShengenWu/dsh-obsidian-channel
 
 然后重启 dsh web。
 
