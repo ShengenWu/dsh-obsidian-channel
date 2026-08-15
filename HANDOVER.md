@@ -1,222 +1,213 @@
-# dsh-alter 会话交接文档
+# dsh-obsidian-channel 项目交接文档
 
-> 生成时间：2026-08-14
-> 2026-08-14 更新：本地 checkout 已从 ~/code/dsh-obsidian 改名为
-> ~/code/dsh-obsidian-channel（与 GitHub 仓库同名）；文中旧路径为历史记录，
-> 重装/复现时请用新路径。
-> 交接范围：本会话（dsh-alter）从「alert 插件需求核查」到「dsh-obsidian-channel M1 落盘」的全部探索、结论、资源与进度。
-> 接收人：下一位开发者。
+> 生成时间：2026-08-14（第 2 版，覆盖 M1 实机验收 + M2 交付，供新接手人通读）
+> 接收人：下一位开发者。上一版交接（dsh-alter 会话的生态调研与 M1 落盘记录）
+> 在 git 历史中（7adc2f9 与更早版本），需要调研背景时翻 git log 或第 10 节。
 
 ---
 
-## 0. 名词澄清（已与交接发起人确认）
+## 0. 项目身份
 
-交接需求里提到的「GitHub Ripple」是口误，实际指「GitHub 仓库（repo）」。本会话
-研究过的全部 GitHub 仓库都列在本文档第 4.3 节（clone/通读的插件仓库，7 个）与
-第 4.4 节（Obsidian 联动竞品，12+ 个），另有第 4.1/4.2 节的官方仓库与生态索引。
-不存在任何名为 Ripple 的项目，后续请勿再检索该名词。
+- 包名 / 插件 id / settings namespace / client bundle id：`dsh-obsidian-channel`
+- GitHub 仓库：https://github.com/ShengenWu/dsh-obsidian-channel （分支 main）
+- 本地 checkout：`/Users/shengen/code/dsh-obsidian-channel`（2026-08-14 由
+  `~/code/dsh-obsidian` 改名而来；已安装插件是符号链接指向此目录）
+- 真实验收 vault：`/Users/shengen/obsidian`
+- 一句话定位：DeepSeek Harness（dsh）插件——把 Obsidian vault 变成 agent 可
+  **安全写入**的知识库（审批门 + journal + 字节级回滚 + Web 设置页/历史面板）。
 
----
+## 1. 一页速览：项目当前状态
 
-## 1. 一页速览：本会话做了什么
-
-1. **alert 插件需求核查**：确认「浏览器通知（agent 提问/审批/任务完成）插件」已被
-   bill9109/dsh-web-ui-notify 完整实现 → 结论「不用新造」，并完成源码级验证与本机
-   rc.6 兼容性验证，给出安装步骤。
-2. **dsh 插件生态全景调研**（已完成的第 1 个目标）：抓取 GitHub dsh-plugin 主题
-   1129+ 仓库（去重 1206）、npm 检索、4 个 awesome/雷达列表全文解析；对照成熟生态
-   39 个能力品类；三轮定向探测验证空白候选 → 产出生态图 + 排序缺口清单。
-3. **方向选择**：向用户展开 db-pack / k8s / 集成中心三个方向；用户是 Obsidian 深度
-   用户，最终选定「Obsidian ↔ dsh 通道」。
-4. **设计文档**：写入 ~/code/dsh-obsidian/DESIGN.md（含五层安全模型、与上游插件
-   dsh-obsidian-export 的联动策略、分阶段计划 M1-M4）。
-5. **Obsidian 联动竞品联网调研**：确认 MCP 生态拥挤但「dsh 原生通道」空白成立，
-   采纳三条外部设计（round-trip 字节安全 / git 自动提交 / kepano skills 互操作），
-   更新进 DESIGN.md 第 13 节。
-6. **M1 落盘**（已完成的第 3 个目标）：安全内核 + 写侧工具 + 审批接入 + 回滚，
-   20/20 单测全绿、真实 rc.6 冒烟通过，git 提交 5377fbf。
-
----
-
-## 2. 当前进度（~/code/dsh-obsidian 项目状态）
-
-### 已完成
-
-| 项 | 状态 |
-|---|---|
-| DESIGN.md | 完整设计（含竞品分析第 13 节、kepano 互操作、round-trip 增强条款） |
-| M1 安全内核 | src/engine.js（~700 行纯函数：边界/冲突/journal/回滚/trash/frontmatter 合并/批量 overlay/保留清理） |
-| M1 工具层 | src/tools.js（10 个工具：read/create/update/append/delete/batch/history/undo/rollback/restore） |
-| M1 装配 | src/index.js（cordis 插件：ctx.fs + ctx.approval + 三级写策略 per-write/per-turn/auto） |
-| bundle 格式 | package.json（dsh.bundle.patch）+ cordis.patch.yml，可被 dsh plugin --profile web add 安装 |
-| 单测 | tests/engine.test.mjs：20/20 全绿（连续 3 次运行稳定；内存 fs 无外部依赖） |
-| 冒烟测试 | tests/smoke.mjs：链接本机 rc.6 真实 dsh-tools/schemastery，10 工具全注册 + 全链路（create→read→守卫更新→字节级 undo→history→越界拦截）通过 |
-| git | 仓库已初始化，初始提交 5377fbf |
-
-### 未完成（下一步）
-
-- **安装实机验证**：执行 dsh plugin --profile web add /Users/shengen/code/dsh-obsidian
-  后重启 dsh web（会中断当前会话，故未执行）。装完在对话里让 agent 调
-  obsidian_read 即可验收。
-- **M2 设置页 + 变更历史面板**（Web 端 diff + 一键回滚；需写 client half，参考
-  dsh-navbar / dsh-web-ui-notify 的 tsdown + ModuleLoader 打包模式）。
-- **M3 daily/模板/图侧**（断链/孤儿/MOC）。
-- **M4 composer 双链补全 + 知识工作流 skills**。
-- DESIGN.md 第 11 节三个开放问题：包名/仓库归属、审批实现 seam 验证（M1 已按官方
-  ctx.approval 实现，尚缺真机审批卡 UI 验证）、alias 别名解析（建议 M4 后置）。
-
-### 关键技术结论（给下一位开发者，省去重新踩坑）
-
-1. **bundle 插件格式**（官方）：package.json 声明 dsh.bundle.patch 指向
-   cordis.patch.yml（- insert: - id/name/inject/config）；host 半纯 JS ESM 零构建；
-   client 半需要 tsdown 打包成 window.__ModuleLoader__.load(...) 包装（dsh-navbar
-   是标准范例）。
-2. **defineTool（rc.6 严格版）**：parameters 为 per-property spec
-   （type/description/enum/required）；output.schema 中每个 object 类型必须显式
-   additionalProperties: true/false，否则 JsonSchemaError（冒烟测试抓到）。
-   execute(args, exec)：exec 有 callId/rootCallId/agent(含 session.id)/signal。
-3. **审批接缝**：ctx.approval.request({agent, toolName, callId, reason, signal})
-   → 'allowed-once'|'rejected'|'cancelled'|'unavailable'，fail-closed；必须在
-   打开的 turn 内调用；会话审批策略 'ask'/'never'（'never' 下所有请求直接拒绝）。
-   本会话自身的审批策略被用户改为 'never'，文件策略改为 danger-full-access
-   （工具调用不再允许设置 sandbox_permissions 提权）。
-4. **ctx.fs（rc.6 全新 target 型 API）**：resolve/processPath/lstat/stat/contains/
-   readText/listDir/writeText；writeText 第二参 FsWriteIntent 支持
-   createIfAbsent / replaceIfVersion(version)（FS_STALE_VERSION/FS_NOT_OBSERVED
-   错误码）；没有 remove/move/mkdir——trash 移动用 host 侧 node:fs rename
-   （本项目只在边界校验通过后使用），writeText 会自动创建父目录；version 是字符串
-   （dev:ino:size:mtimeNs:ctimeNs），FsWriteOutcome 自带 before 全文（权威前像）。
-5. **schemastery**：z.union(['a','b']).default('a') 数组字面量写法合法。
-6. **journal 设计决策**：两阶段 planned→done；ts 必须单调递增（按 UUID 文件名排序
-   会乱序——本会话实测 bug）；回滚=写回 before 快照并留 undo 条目（可再撤）；
-   删除=移入 .dsh-obsidian/trash/<flat-path>.<opId>.md。
-7. **版本漂移**：本机安装版 rc.6 与本地源码 checkout rc.5 不一致；以安装版为准
-   （/Users/shengen/.nvm/versions/node/v24.13.0/lib/node_modules/@deepseek-ai/dsh）。
-8. **写文件陷阱**：通过工具写代码文件时，内容里的反引号和 JS 模板插值语法（美元
-   大括号）会破坏外层模板，裸的换行转义会被转成真实换行——全部改用字符串拼接、
-   双反斜杠转义（本会话踩过多次）。
-
----
-
-## 3. 已完成的三个目标与结论摘要
-
-### 目标 1：alert 插件需求核查 → 结论：已被实现，不用新造
-
-- bill9109/dsh-web-ui-notify（v0.1.2，BSD-3-Clause，2026-08-13 活跃）完整覆盖：
-  提问/审批/plan-review 等待 + 每轮完成 + 后台会话整体完成 → 浏览器 Notification
-  （requireInteraction 不自动消失）→ 点击跳回对应会话；去重；设置→通用授权开关。
-- 本会话已逐行通读其源码并验证与本机 rc.6 的 API 兼容性（pendingInteraction/
-  pending/turnEnds/openState/slots/locale 全部存在）。
-- 安装：dsh plugin --profile web add github:bill9109/dsh-web-ui-notify，重启 web，
-  设置→通用→桌面通知授权（macOS 还要在系统设置→通知允许浏览器）。
-- 注意：标签页关闭后浏览器不弹通知（Notification API 通病）。
-- 补充：omdsh-dev/dsh-notification 只做完成通知+关键词规则，可互补。
-
-### 目标 2：生态全景调研 → 产出 dsh-ecosystem-gap-report.md
-
-- 数据规模：1206 仓库 / 37 能力桶 / Adam 雷达 286 项（仅 40 兼容、190 待调研、
-  9 需适配、12 占位）/ 4 个 awesome 列表 / npm 检索 / 39 个成熟生态品类对照 /
-  三轮探测（40+ 关键词）。
-- 三大结构性发现：兼容性断裂；dsh-external 组织公开仓库数为 0（半私有目录）；
-  无 npm 分发文化。
-- 确认空白（0 命中）：数据库工具集、kubectl/K8s、SaaS 连接器（Notion/Jira/Slack/
-  Composio）、MCP 一键目录、JetBrains、共享 hooks 库、代码格式化、RSS、Maven、
-  企业治理审计。已有但很薄：Langfuse 观测（0★）、邮件（2★）、日历、翻译、
-  秘密扫描、webhook、金融行情、Android、音乐。
-- 优先级建议：① dsh-db-pack ② dsh-k8s ③ 集成中心（SaaS 连接器 + MCP 目录）。
-
-### 目标 3：dsh-obsidian-channel M1 → 已落盘提交（见第 2 节）
-
----
-
-## 4. 全部资源清单
-
-### 4.1 官方资源（dsh / cordis）
-
-| 资源 | 链接 / 本地位置 |
-|---|---|
-| dsh 官方仓库 | github.com/deepseek-ai/deepseek-harness（本地 checkout：/Users/shengen/code/deepseek-harness，rc.5） |
-| 本机安装版 dsh（rc.6，运行基准） | /Users/shengen/.nvm/versions/node/v24.13.0/lib/node_modules/@deepseek-ai/dsh |
-| cordis 框架 | github.com/cordiverse/cordis（官方仓库）+ github.com/cordiverse/paper |
-| 官方文档 | deepseek-harness.github.io/deepseek-harness/guide/quickstart；/develop/basic（config/tool/publish）；/develop/framework（events/service） |
-| 本会话读过的官方源码 | packages/core/tools/src/schema.ts（defineTool）；packages/interaction/user-approval（审批接缝）；packages/fs/fs + dsh-fs-local（fs 接缝）；packages/mcp/mcp-client；packages/hooks（hook-protocol + claude/codex 桥）；packages/guard/compaction/context/goal/plan/preset/interaction/schedule/session-query/storage/credentials/api/attachment；packages/client/runtime、ui-slots、ui-settings、ui-user-questions、ui-permission-presets；apps/web；packages/bundle/web-app |
-
-### 4.2 生态索引与目录
-
-| 资源 | 链接 |
-|---|---|
-| libukai awesome（用户给的入口） | github.com/libukai/awesome-deepseek-harness |
-| 0xsline awesome | github.com/0xsline/awesome-deepseek-harness |
-| awesome-dsh-plugin（178 项精选） | github.com/awesome-dsh-plugin/awesome-dsh-plugin + 其 dsh-find-plugin |
-| Adam 兼容性雷达（286 项 + 每日扫描） | github.com/AdamPlatin123/awesome-dsh-plugins（PLUGINS.md 为登记表，完整目录在 README 的 AUTO 区块） |
-| 其他索引 | github.com/bruc3van/awesome-dsh-plugin；github.com/Alex-Yanggg/awesome-DSH-plugin；github.com/Dominic789654/awesome-deepseek-harness |
-| GitHub 主题 | github.com/topics/dsh-plugin（1129+ 仓库，本会话抓取 1206 去重） |
-| dsh-external 组织 | github.com/dsh-external（公开仓库数 0，大量目录链接实际私有/占位） |
-
-### 4.3 研究过的具体插件仓库（本会话 clone/通读过的，clone 在 dsh-alter/research/）
-
-| 仓库 | 看点 |
-|---|---|
-| vlln/dsh-navbar | 官方 bundle 双半（Node 空壳 + client ModuleLoader）标准范例 |
-| Small-tailqwq/dsh-deep-whale | Web client bundle（maid-atelier 主题） |
-| omdsh-dev/dsh-notification | 完成通知 + 关键词规则 + 设置页（settings.general.item 槽位范例） |
-| bill9109/dsh-web-ui-notify | alert 需求的现成实现（详见第 3 节目标 1） |
-| xiaomiba0904/dsh-obsidian-export | 上游插件：纯函数 engine.js + 读侧六件套 + 会话导出（本项目的依赖与复用对象） |
-| yjh051108/dsh-super-injector | 运行时插件注入器（开发向基础设施） |
-| zhaoscsc/dsh-wikilink | 输入框双链补全（M4 的参考/共存对象） |
-
-### 4.4 Obsidian 联动生态（联网调研，全部已读 README/竞争文档）
-
-| 类别 | 仓库 / 链接 | 要点 |
+| 里程碑 | 状态 | 提交 |
 |---|---|---|
-| MCP+skills（最接近本设计） | github.com/bettyguo/obsidian_mcp（+ docs/competitive.md 完整竞品表） | 22 工具 + 7 工作流 skills + round-trip 字节级安全协议 |
-| 官方 skills | github.com/kepano/obsidian-skills（~17.7k★） | Obsidian CEO 发布；.md/.base/.canvas 格式原语；本项目互操作对象 |
-| MCP+git 回滚 | github.com/t-rhex/obsidian-mcp-server（npm: mcp-obsidian-vault） | 27 工具 + 每次写自动 git commit + 任务编排/决策日志 |
-| MCP 深度 convention | github.com/cyanheads/obsidian-mcp-server（~516★） | 14 工具，wiki/frontmatter/periodic notes |
-| MCP 高星 | github.com/MarkusPfundstein/mcp-obsidian（~3.7k★，Local REST API） |
-| MCP 文件直连 | github.com/StevenStavrakis/obsidian-mcp（~703★）；natestrong/obsidian-mcp（PyPI，SQLite 索引） |
-| Obsidian 应用内 MCP | github.com/DoktorDaveJoos/cortex-mcp（HTTP :27182）；2233admin/obsidian-vault-bridge |
-| Obsidian 应用内 AI（互补） | Smart Connections（~786k 装机）；Copilot（logancyang，~6k★）；Khoj；Text Generator；BMO |
-| 其他 | es617/obsidian-sync-mcp；Shreg-ai/compiler；yuukiLike/zeromd（同步）；sunnybluesea/deepseek-obsidian-plugin（DeepSeek 模型入 Obsidian，与 dsh 无关） |
+| M1 安全内核 + 写侧 + 回滚 | ✅ 完成并实机验证（3 个真机 bug 已修） | 5377fbf / 0b45eb9 |
+| M2 设置页 + 变更历史面板 | ✅ 代码完成、测试全绿，**实机验收待 web 重启后执行** | b7cf841 |
+| 文档 | DESIGN.md §13 竞品 / §14 M1 验收 / §15 M2 实现；README；本文档 | 2712483 / 4cb7665 |
+| 发布 | GitHub main 已推送全部 7 个提交，本地=远端 | a24b418 / 7331e60 |
 
-### 4.5 本地资源文件（工作区 /Users/shengen/code/dsh-alter）
+- **测试**：单测 21/21 全绿；冒烟（真实 rc.6 dsh-tools/schemastery + M2 接线断言）全绿。
+- **实机状态**：插件已安装在 web profile（符号链接模式）。截至最后一次探测（2026-08-14），
+  dsh web **尚未重启**——运行中的还是旧代码：错误路径仍会触发已修复的 schema bug。
+  **接手第一件事：重启 dsh web，然后按第 7 节清单做验收。**
 
-| 文件 | 内容 |
-|---|---|
-| dsh-ecosystem-gap-report.md | 生态全景与空白分析总报告 |
-| ai-agent-plugin-capability-list.md | 成熟生态 39 能力品类清单（子代理产出，22 次搜索） |
-| research/ecosystem/all-repos.json | 1206 个仓库元数据（stars/pushed/描述/主题） |
-| research/ecosystem/bucketized.json | 37 桶归类结果 |
-| research/ecosystem/adam-catalog.json | Adam 286 项 + 兼容性状态 |
-| research/ecosystem/oxsline-sections.json / awesome-sections.json | 两个精选列表解析 |
-| research/ecosystem/npm-*.json（slim 版可读） | npm 三路检索原始数据 |
-| research/ecosystem/topic-page1..10.json | GitHub 主题原始分页 |
-| research/ecosystem/probe_gaps*.py + final_probe.py | 三轮空白探测脚本（可重跑） |
-| research/dsh-navbar / dsh-deep-whale / dsh-notification / dsh-web-ui-notify / dsh-obsidian-export | 参考插件 clone |
+## 2. 仓库与 git
 
-### 4.6 项目文件（/Users/shengen/code/dsh-obsidian）
+```bash
+git clone git@github.com:ShengenWu/dsh-obsidian-channel.git
+# 或 https://github.com/ShengenWu/dsh-obsidian-channel.git
+cd dsh-obsidian-channel
+git remote -v   # origin -> git@github.com:ShengenWu/dsh-obsidian-channel.git
+```
+
+- 分支 `main`；发布 = `git push origin main`（本机 git 有 insteadOf 规则，HTTPS 自动走
+  SSH agent，无需代理；GitHub 直连可用，备用代理 `http://127.0.0.1:7897`）。
+- 7 个提交（老到新）：5377fbf M1 → 0b45eb9 真机修复 → 2712483 验收记录 → b7cf841 M2
+  → 4cb7665 M2 设计记录 → a24b418 仓库发布 → 7331e60 目录改名。
+
+## 3. 文件地图
 
 | 文件 | 说明 |
 |---|---|
-| HANDOVER.md | 本文档 |
-| DESIGN.md | 设计文档（334+ 行，含第 13 节竞品分析） |
-| README.md | 插件使用说明（安装/安全模型/开发测试） |
-| src/engine.js / src/tools.js / src/index.js | M1 实现 |
-| cordis.patch.yml / package.json | bundle 装配 |
-| tests/engine.test.mjs（20/20）/ tests/smoke.mjs（rc.6 冒烟） | 测试 |
-| scripts/link-runtime.sh | 建立 rc.6 运行时符号链接（跑冒烟前置） |
+| DESIGN.md | 设计总文档：§5 五层安全模型、§6 设置页 UX、§9 分阶段、§13 竞品、§14 M1 验收、§15 M2 实现 |
+| src/engine.js | 安全内核（~750 行纯函数）：边界/冲突/journal/回滚/trash/frontmatter 合并/批量 overlay/保留清理 |
+| src/tools.js | 10 个 defineTool 工具（read/create/update/append/delete/batch/history/undo/rollback/restore）+ cleanNulls 边界 |
+| src/index.js | host 半装配：工具注册 + installSettingsSection + /obsidian connection RPC 通道 |
+| src/client/index.tsx | client 半入口：locale + settings.section 注册 |
+| src/client/ObsidianSection.tsx | 设置页组件：配置字段 + 变更历史面板（LCS diff + 一键回滚） |
+| src/client/locales.ts | zh/en 词典 |
+| lib/client.js | client 半构建产物（tsdown，25KB，已提交；改 client 源码后必须重跑 build 并提交） |
+| tsdown.config.mjs | client 打包配置（ModuleLoader 契约 banner/footer/intro） |
+| cordis.patch.yml / package.json | bundle 装配：insert(id/inject/config) + dsh.client + exports[./client] |
+| tests/engine.test.mjs | 21 个安全内核单测（内存 fs，零外部依赖） |
+| tests/smoke.mjs | rc.6 全链路冒烟：工具注册 + 全管线 + schema conformance + M2 settings/RPC 断言 |
+| scripts/link-runtime.sh | 把已安装 rc.6 运行时包链接进本仓库 node_modules（跑冒烟前置） |
 
----
+## 4. 架构速览
 
-## 5. 给下一位的交接建议
+### 4.1 五层安全模型（DESIGN §5，M1 已全部实现）
 
-1. 先读 DESIGN.md（特别是第 5 节安全模型与第 13 节竞品分析），再读 README 和
-   三个 src 文件（engine → tools → index 的依赖顺序）。
-2. 接手 M2 前，先实机装一次 M1（dsh plugin --profile web add + 重启 web），
-   用真实 vault 验收 obsidian_read/create/undo，确认审批卡 UI 正常弹出
-   （这是 M1 唯一未真机验证的点）。
-3. 生态调研数据全在 dsh-alter/research/ecosystem/，可复现（探测脚本保留）；
-   若要做 db-pack/k8s/集成中心，直接复用 dsh-ecosystem-gap-report.md 的证据。
-4. 本会话总结的「关键技术结论」（第 2 节）是踩坑换来的，新同学先读这 8 条。
-5. 未知事项：本会话未探索任何「GitHub Ripple」相关内容（见第 0 节），如确有所指
-   请补充后再交接。
+L0 边界（路径 sanitize/逃逸拒绝/symlink 拒绝/排除目录）→ L1 永不静默覆盖
+（version 守卫 + conflict 报告；删除永远走 trash）→ L2 写入审批（ctx.approval，
+writePolicy per-write/per-turn/auto）→ L3 journal（先落 planned 再 done，含 before
+全文快照，30 天保留）→ L4 回滚（undo/rollback 字节级恢复，回滚本身也留痕可再撤）。
+
+### 4.2 host 半（纯 JS ESM，零构建）
+
+- 服务注入：tools / fs / approval；settings 与 connection 均为可选接线
+  （ctx.inject(['settings'], cb) / ctx.inject(['connection'], cb)，无则优雅降级）。
+- **settings 通道**：installSettingsSection(ctx, ns, Config, 组合 entry, hooks)，
+  hooks.setSource 把 live source thunk 交给全部工具与 RPC——配置写入即时生效。
+  注意：apply(ctx, config) 的 config 是装载时静态值，必须经 scope 读 live 值。
+- **RPC 通道**：ctx.connection.rpc.handle('/obsidian', handler, { authority: 'loopback' })，
+  端点 history/list、history/entry（before/after 全文）、history/rollback、vault/check。
+  错误返回 { ok: false, error: { code: 'internal', message, details: {} } }。
+- 面板回滚**不走 ctx.approval**（该 seam 要求 agent + 打开的 turn，UI 点击两者皆无）；
+  按钮点击即用户授权；回滚自身 journal 留痕。
+
+### 4.3 client 半（TSX，tsdown 构建）
+
+- 服务注入：slots / settingsScope / locale / connection。
+- 注册 `settings.section`（Settings → Obsidian 页）：4 个配置字段经
+  ctx.settingsScope.bind({namespace}) 读写（落盘 $DSH_HOME/settings.yaml，热发布）；
+  变更历史面板经 rpc 拉取 journal、LCS 行级 diff、一键回滚。
+- 打包契约：CJS + window.__ModuleLoader__.load 包装，react/jsx-runtime 全部 external
+  （shell 提供）；dsh.client + exports[./client] 被 dsh-client-modules 发现。
+
+## 5. 本地开发环境
+
+```bash
+cd /Users/shengen/code/dsh-obsidian-channel
+npm install              # 安装 tsdown 等 devDeps
+sh scripts/link-runtime.sh   # 链接已安装 rc.6 运行时包（dsh-tools/dsh-settings/schemastery）
+npm test                 # node --test tests/engine.test.mjs（21/21）
+node tests/smoke.mjs     # 真实 rc.6 全链路冒烟
+npm run build            # tsdown -> lib/client.js（改 client 源码后必须执行并提交产物）
+```
+
+- 注意 Node 24 的 `node --test tests/`（目录参数）会异常报 fail，用显式文件路径。
+- rc.6 权威运行时：/Users/shengen/.nvm/versions/node/v24.13.0/lib/node_modules/@deepseek-ai/dsh
+  （本地源码 checkout 是 rc.5，一切以安装版为准）。
+
+## 6. 安装与配置
+
+```bash
+dsh plugin --profile web add github:ShengenWu/dsh-obsidian-channel
+# 或本地路径（开发）：dsh plugin --profile web add /Users/shengen/code/dsh-obsidian-channel
+# 然后重启 dsh web
+```
+
+- 本机现状：web profile 已装（符号链接 -> ~/code/dsh-obsidian-channel），无需重装，
+  重启即可加载全部修复与 M2。
+- settings.yaml 已预置（~/dsh 配置文件 $HOME/.dsh/settings.yaml）：
+  `dsh-obsidian-channel: { vaultDir: /Users/shengen/obsidian }`，重启后 agent 免传 vaultDir。
+- 若目录改名/移动：`dsh plugin --profile web add <新绝对路径>` 即可重建符号链接
+  （会同步更新 profile package.json 与 pnpm-lock）。
+- 图形配置：Settings → Obsidian（vault/策略/排除/保留天数，写后即时生效）；
+  完整配置表单同时出现在 Settings → Plugins → dsh-obsidian-channel。
+
+## 7. 实机验收状态与清单
+
+### 7.1 已实机验证 ✅（旧代码下）
+
+- 10 工具注册、真实 vault 读取、dryRun 全链路（真实 vault、不触发审批）。
+- 写入 + 会话审批策略 'never' + writePolicy per-write → denied/rejected，**vault 零触碰**
+  （审批门在 journal/写入之前，fail-closed 路径实锤）。
+- 路径越界拦截（冒烟覆盖）。
+
+### 7.2 重启 web 后的验收清单（接手人第一件事）
+
+1. boot manifest 出现本插件条目（curl http://127.0.0.1:3080/ 的 window.__DSH_BOOT__），
+   且 /plugins/dsh-obsidian-channel/client.js 返回 200。
+2. agent 侧：obsidian_read 读不存在的笔记 → 返回干净的 {ok:false, code:'NOT_FOUND', message}
+   （重启前会报 output schema 校验错，是旧代码复现）。
+3. obsidian_read 读无 H1/无 frontmatter 的笔记（如 Daily/08-13-2026.md）→ 正常返回，
+   title/frontmatter 键省略而非 null。
+4. 不传 vaultDir 直接读 → 应命中 settings 预置默认。
+5. 浏览器走查：Settings → Obsidian 页可见；改一个配置值 → 落盘 settings.yaml；
+   历史面板可见既有 journal（或让 agent 写一笔再看）；展开 diff、回滚一笔真实变更。
+6. （可选）把会话审批策略从 'never' 改回 'ask'，让 agent 做一笔写入 → 审批卡 UI 弹出；
+   这是 M1 唯一未真机验证的点。
+
+## 8. 关键技术结论（踩坑换来的，新同学先读这节）
+
+### 8.1 M1 组（schema/引擎）
+
+1. rc.6 harness 在工具调用层对返回结果做 output.schema 运行时校验；smoke 直接调编译后
+   execute 会绕过这层——本仓库已在 smoke 里内置 conform() 检查器镜像该校验。
+2. 所有 output.schema 顶层对象必须显式 additionalProperties:false 并声明全部字段；
+   可选字段缺失即可，返回 null 会违反类型约束（cleanNulls 在工具边界剥离）。
+3. computeNextText 的 changed 必须字节比较，不能硬编码 true（同字节更新会假提交）。
+4. ctx.fs 是 target 型 API（resolve/processPath/stat/readText/writeText/listDir）；无
+   remove/move/mkdir——trash 移动用 host 侧 node:fs rename（仅在边界校验后）。
+5. journal 两阶段 planned→done；ts 单调递增（UUID 文件名排序会乱序）；删除=移入
+   .dsh-obsidian/trash/<flat-path>.<opId>.md。
+
+### 8.2 M2 组（settings/RPC/client bundle）
+
+1. settings：host 用 installSettingsSection（可选接线，无需写进 inject）；client 用
+   ctx.settingsScope.bind({namespace}) → getSnapshot/subscribe/set(field,value)。
+2. 数据通道：RpcMethodMap（/api 域）封闭不可扩展；但 ctx.connection.rpc.handle 是通用
+   逻辑通道 seam（自带 loopback 信任栅与信封校验），/api 频道本身即建于其上；备选
+   方案是 ctx.webServer 裸 HTTP 路由。harness.handle/host.call 只属于「模型定义的动态包」，
+   与静态 bundle 无关，别混淆。
+3. 回滚不走 ctx.approval（需要 agent + open turn），UI 点击即授权。
+4. client bundle：package.json dsh.client {platform:'web', inject:[4 个 client 包边]} +
+   exports[./client]；tsdown banner/footer/intro 三段式 ModuleLoader CJS 契约；
+   external 必须含 react/react-dom/react/jsx-runtime/@deepseek-ai/dsh-client-*；
+   module id = 包名；产物被服务在 /plugins/<id>/client.js。
+5. slots：settings.section 注册 {name,id,order,label(可为 thunk),locale,inject}；
+   inject 工厂返回对象的键成为组件顶层 props；ctx.slots.inject('slot', cb) 声明感知等待；
+   生命周期 disposer 走 ctx.effect。
+6. 应用无 CSP（实测无 header/meta），内联 <style> 注入安全。
+
+### 8.3 通用坑
+
+1. 静态 bundle 改代码必须重启 dsh web（无 HMR）；插件集合变更同理。
+2. 已安装插件是符号链接指向本仓库——本地改动即安装内容，但需重启才生效。
+3. 通过工具写代码文件时，内容里的反引号/模板插值会破坏外层模板：改用字符串拼接或
+   字符串数组 join（本会话踩过多次）。
+4. 会话审批策略 'never' 会让所有 ctx.approval.request 直接拒绝——正好可用于验证
+   fail-closed，但验证审批卡 UI 必须改回 'ask'。
+
+## 9. 下一步（接手建议）
+
+1. **重启 + 第 7.2 节验收**（最高优先级）。
+2. M3 daily/模板/图侧：daily 按模板建卡、周报、断链/孤儿/MOC（引擎已有索引缓存预留）。
+3. M4 composer 双链补全 + 知识工作流 skills：参考 zhaoscsc/dsh-wikilink（双链补全，
+   已 clone）与 kepano/obsidian-skills（格式原语，互操作对象）。
+4. 可选 M2.5：变更历史面板加 sidebar.footer.action 触发器 + shell.overlay 浮层
+   （现面板在设置页内，DESIGN §6 原案）。
+5. 开放问题：alias 别名解析（建议 M4 后置）；审批卡 UI 真机验证（见 7.2）；
+   与上游 dsh-obsidian-export 的注册接管（peerDependency 已声明）。
+
+## 10. 历史资源（上一会话 dsh-alter 的调研资产）
+
+- 生态调研数据：/Users/shengen/code/dsh-alter/research/ecosystem/（all-repos.json 1206
+  仓库、bucketized.json、adam-catalog.json、探测脚本可重跑）。
+- 生态空白报告：/Users/shengen/code/dsh-alter/dsh-ecosystem-gap-report.md
+  （db-pack/k8s/集成中心三个方向论证，若转向可复用）。
+- 参考插件 clone：/Users/shengen/code/dsh-alter/research/ 下 dsh-navbar（client 打包范例）、
+  dsh-web-ui-notify（settings 行 + 通知）、dsh-notification、dsh-deep-whale、
+  dsh-obsidian-export（上游读侧）、dsh-super-injector、dsh-wikilink。
+- 旧版交接文档全文：git 历史 7adc2f9（含竞品调研表格、官方仓库清单、rc.6 API 笔记）。
+- 本会话的验收/实现记录：DESIGN.md §14（M1 实机验收 + 3 个 bug 详情）、§15（M2 接线全景）。
