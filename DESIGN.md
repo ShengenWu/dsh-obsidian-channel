@@ -1,8 +1,8 @@
 # dsh-obsidian-channel 设计文档
 
-> 状态：草案 v0.1（待评审）
-> 日期：2026-08-14
-> 作者：dsh-alter 会话
+> 状态：v0.2（M1/M2 实机验收 + M2.5 已落地，见 §14/§15/§16）
+> 日期：2026-08-14 起稿，2026-08-15 更新
+> 作者：dsh-alter 会话 + 后续开发
 > 定位：把 DeepSeek Harness（dsh）变成 Obsidian 的原生知识管理协作者——读、写、维护你的 vault，且任何让你不满意的操作都能一键回滚。
 
 ---
@@ -294,7 +294,8 @@
 |---|---|---|
 | M1 安全内核 + 写侧（本设计核心） | journal/回滚引擎、note_create/update/append/delete/batch、undo/history/rollback/restore、审批接入 | 任意写操作可 undo；冲突不覆盖；逃逸路径被拒（全部有单测） |
 | M2 设置页 + 历史面板 | vault/策略配置、变更历史+一键回滚 UI | 浏览器里能配好 vault 并回滚一笔真实变更 |
-| （M2 已实现，2026-08-14 提交 b7cf841；实机验收待 web 重启后执行） | settings.section 页（settingsScope 配置 + /obsidian RPC 历史面板） | 同左 |
+| （M2 已实现并实机验收，2026-08-14 提交 b7cf841、2026-08-15 提交 bb1e119） | settings.section 页（配置经 /obsidian RPC，历史面板 diff+回滚） | 同左 |
+| M2.5 侧边栏入口 + 水下安全层 | 📓 Obsidian 入口（vault 变 workspace）、沙箱升级、fs 写守卫、设置页绕过 | 点入口开 vault 会话；原生 write/edit 进 vault 被拒 |
 | M3 daily/模板/图侧 | daily、templates、graph、moc | 按模板建卡、生成周报、断链报告可用 |
 | M4 composer + skills + 文档 | [[ 补全、引用注入、5 个 skill、README/zh | 输入框补全可用；skill 走查通过 |
 
@@ -452,3 +453,93 @@
   通道。
 - rollback 不走 ctx.approval（见上）；writePolicy 只约束 agent 工具路径。
 - 面板先落在设置页内（DESIGN §6 原案）；sidebar.footer.action 触发器留作后续。
+
+---
+
+## 16. M2 实机验收 + M2.5 实现记录（2026-08-15，提交 bb1e119）
+
+> 接手人变更：本机为 `shanewu` / Node v24.12.0 / vault `/Users/shanewu/obsidian`，
+> 运行时为安装版 rc.6（上一任 `shengen` / v24.13.0 的环境不在此机）。仓库
+> checkout 与 vault 路径均已换成本机路径。
+
+### 16.1 M2 实机验收发现的四个真机问题（均已修复）
+
+1. **settings 默认 vaultDir 时序 bug**：`installSettingsSection()` 内部用异步
+   `ctx.inject(['settings'], cb)`，而 `apply` 里 `let currentConfig` 被 `setSource`
+   重赋后，工具在 `apply` 时**按值捕获了旧函数**，live settings 永远进不来。
+   修复：改成「稳定 thunk 读可变 source」（`let source`；`const currentConfig =
+   () => source()`）。
+2. **batch dry-run 缺 `action` 字段**：`batchMutate` 返回 `{ok, results, message}`
+   而无 `action`，违反 output schema 的 `required: action`。修复：补
+   `action:'batch'`。
+3. **smoke 的 conform() 不查 `required`**：早期检查器只查类型与
+   `additionalProperties`，漏掉 required 约束，导致 bug 2 溜过。修复：conform
+   增加 required 字段检查；并把 fake `ctx.inject` 改为异步（`queueMicrotask`）
+   模拟真实 Cordis，否则时序 bug 会被同步 stub 掩盖。
+4. **设置页「配置通道不可用」**：见 16.2。
+
+### 16.2 设置页不可用的根因与绕过（【DSH 尚未适配】）
+
+- **根因**：DSH `dsh-host-apiproxy` 的 `settings.describe` RPC 只返回硬编码
+  白名单 `WEB_SETTINGS_NAMESPACES`（agent-loop/shell/locale/permission/
+  ui-conversation/ui-theme/web-search-deepseek）+ model provider + `ui-onboarding`/
+  `agent-presets` 的 namespace；其余（含**所有第三方**）被 `filter` 掉，写入也报
+  `settings-not-exposed`。源码注释明说「Moving that declaration to
+  settings.register() … is deferred work」。**第三方插件的 settings namespace
+  注册是成功的，但官方 `settingsScope` 通道对第三方不可达。**
+- **绕过**：配置表单改走本插件自己的 `/obsidian` RPC（`config/get`、`config/set`），
+  持久化仍走官方 `settings.update` seam（落盘 settings.yaml 不变）。
+- **回迁条件**：待 DSH 上游支持第三方 namespace 暴露（`settings.describe` 不再
+  按白名单过滤）后，改回官方 `installSettingsSection` + 客户端 `settingsScope`。
+  代码三处已用 `【DSH 尚未适配】` 注释标注。
+
+### 16.3 沙箱升级（sandbox_permissions）
+
+- **问题**：vault 若在 DSH 沙箱 workspaceRoot（`session.header.cwd ?? process.cwd()`）
+  之外，`ctx.fs` 写被拒（`FS_SANDBOX_DENIED`）。用户不应为写 vault 而改变启动目录。
+- **方案**：写工具（create/update/append/delete/batch/undo/rollback/restore）接入
+  官方升级通道——声明 `sandbox_permissions` + `justification` 参数，被拒后走
+  `approveEscalation`（`@deepseek-ai/dsh-sandbox`）→ `ctx.approval` 弹卡批准 →
+  以更宽 policy 重写；`ctx.fs.writeText` 第 5 参 `sandboxPolicy` 穿透到引擎所有
+  写点。
+- **备注**：会话 cwd=vault 时沙箱天然放行 vault 写，无需升级；升级通道仅作为
+  「从非 vault 会话改 vault」的兜底。
+
+### 16.4 fs 写守卫（强制用对工具）
+
+- **动机**：安全层是水下的。若 agent 在 vault 会话用原生 `write`/`edit` 直接改
+  vault，会绕过 journal/回滚。仅靠 prompt 引导不可靠。
+- **方案**：注册 `fs/write-intent`、`fs/edit-intent` 瀑布监听（`prepend`），命中
+  vault 即 `throw`（错误信息引导改用 `obsidian_*` 工具）。这是 DSH 内置
+  `fs-observation-policy` 用的同一 gate；本插件 obsidian_* 工具直连 `ctx.fs`、
+  不派发该事件，故不受误伤。
+- **已知缺口**：`bash` 子进程不走 fs 写守卫（受 sandbox 管，但 vault 会话里
+  sandbox 根即 vault，仍能写而不留 journal）。路径级沙箱待 DSH 上游。
+
+### 16.5 侧边栏入口（M2.5）
+
+- **定位**：产品面不做自定义面板，入口 = 一个 DSH workspace。点 📓 Obsidian →
+  vault 注册为 workspace（`workspaces.create({path})`）并开会话
+  （`workspaces.startSession(workspaceId)`），用户得到的就是原生对话。
+- **机制**：DSH sidebar shell 无外部 slot，采用 task-board/SSH 同款「DOM 注入 +
+  MutationObserver 自愈 + 家族块互认」。**不 import web-ui**，只读 sibling 的
+  DOM 标记（`data-dsh-taskboard-entry`/`data-dsh-ssh-entry`）做稳定排序；开面板前
+  移除它们的 active 属性并派发 `dsh-panel-activate`(detail='obsidian')，互斥共存。
+- **未配置引导**：首次点击读 `config/get` 无 vaultDir → `window.prompt` 引导 →
+  `config/set` 持久化 → 开会话。
+- **坑**：`WorkspaceView` 的字段是 `workspaceId`（不是 `id`）；传 `undefined`
+  给 `startSession` 会回退到当前工作区。
+
+### 16.6 依赖/构建可移植化
+
+- 删除 `scripts/link-runtime.sh`（硬编码上上任机器 Node 路径）；改为 package.json
+  devDeps 显式钉 `@deepseek-ai/*` rc.6（`^0.1.0-rc.6` 等），`npm install` 从 npm
+  拉齐。注意 rc.6 挂在 `next` dist-tag，`latest` 仍是旧的 `0.0.1-rc.1`。
+- 新增 `package-lock.json`；devDeps 补齐 `dsh-tools/dsh-settings/schemastery/dsh-sandbox`，
+  peerDeps 加 `dsh-sandbox`。
+
+### 16.7 测试现状
+
+- engine 单测 21/21；smoke 全绿，回归覆盖五类：settings 默认 vaultDir、batch
+  dry-run、沙箱升级（拒绝映射 + 升级重写）、fs 写守卫（vault 拒绝 + 非 vault 放行）、
+  config RPC（get/set 往返）。
