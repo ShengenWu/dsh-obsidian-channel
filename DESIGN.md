@@ -328,8 +328,9 @@
 
 开放问题（2026-08-14 更新）：
 1. ✅ 包名/仓库归属已定：包名 dsh-obsidian-channel，仓库
-   https://github.com/ShengenWu/dsh-obsidian-channel（本地 checkout 在
-   ~/code/dsh-obsidian，为已安装插件的符号链接目标，勿改名）
+   https://github.com/ShengenWu/dsh-obsidian-channel（本地 checkout 已从
+   ~/code/dsh-obsidian 改名为 ~/code/dsh-obsidian-channel，2026-08-14；
+   重装插件命令见 README）
 2. ✅ 审批走官方 permission seam（ctx.approval）：M1 已实机验证 fail-closed
    路径（'never' 策略拒绝且 vault 零触碰）；审批卡 UI 待 'ask' 策略下真机复验
 3. 是否需要 alias（Obsidian 别名）解析支持？（建议 M4 后置）

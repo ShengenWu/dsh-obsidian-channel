@@ -1,6 +1,9 @@
 # dsh-alter 会话交接文档
 
 > 生成时间：2026-08-14
+> 2026-08-14 更新：本地 checkout 已从 ~/code/dsh-obsidian 改名为
+> ~/code/dsh-obsidian-channel（与 GitHub 仓库同名）；文中旧路径为历史记录，
+> 重装/复现时请用新路径。
 > 交接范围：本会话（dsh-alter）从「alert 插件需求核查」到「dsh-obsidian-channel M1 落盘」的全部探索、结论、资源与进度。
 > 接收人：下一位开发者。
 
