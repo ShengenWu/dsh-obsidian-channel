@@ -51,7 +51,8 @@
     "@deepseek-ai/cordis": "*",
     "dsh-obsidian-export": "*",
     "@deepseek-ai/dsh-settings": ">=0.1.0-rc.6 <1",
-    "@deepseek-ai/dsh-client-connection": ">=0.1.0-rc.6 <1"
+    "@deepseek-ai/dsh-client-connection": ">=0.1.0-rc.6 <1",
+    "@deepseek-ai/dsh-sandbox": ">=0.1.0-rc.6 <1"
   },
   "peerDependenciesMeta": {
     "dsh-obsidian-export": {
@@ -63,6 +64,10 @@
     "build": "tsdown --config ./tsdown.config.mjs"
   },
   "devDependencies": {
+    "@deepseek-ai/dsh-sandbox": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-settings": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
+    "@deepseek-ai/schemastery": "^3.18.1",
     "tsdown": "0.22.2"
   }
 }

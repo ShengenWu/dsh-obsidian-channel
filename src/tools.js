@@ -79,9 +79,20 @@ export function hostOf() {
 // Registry
 // ---------------------------------------------------------------------------
 
-export function registerObsidianChannelTools(ctx, getConfig, makeApprover) {
+export function registerObsidianChannelTools(ctx, getConfig, makeApprover, sandbox) {
   const host = hostOf()
   const sessionIdOf = (exec) => (typeof exec.agent?.session?.id === 'string' ? exec.agent.session.id : null)
+
+  // Resolve the per-call sandbox policy (standing + optional one-shot escalation)
+  // and translate a fs fence denial into the model-facing marker + retry hint.
+  const resolveSandboxPolicy = async (toolName, args, exec) => {
+    try {
+      return { policy: await sandbox.resolvePolicy(toolName, args, exec) }
+    } catch (err) {
+      return { policyError: String(err?.message ?? err) }
+    }
+  }
+  const sandboxErrorOf = (err, policy) => sandbox.mapError(err, policy)
 
   const common = (toolName, describe) => ({
     vaultDir: {
@@ -179,6 +190,7 @@ export function registerObsidianChannelTools(ctx, getConfig, makeApprover) {
       parameters: {
         ...common(toolName, 'Note path relative to the vault root, e.g. "Projects/demo.md".'),
         ...extraParams,
+        ...sandbox.schemaFields(),
       },
       output: {
         schema: {
@@ -204,6 +216,8 @@ export function registerObsidianChannelTools(ctx, getConfig, makeApprover) {
         ),
       },
       async execute(args, exec) {
+        const { policy, policyError } = await resolveSandboxPolicy(toolName, args, exec)
+        if (policyError !== undefined) return errTurn(policyError)
         try {
           const vault = await vaultOf(ctx, getConfig, args)
           const res = await mutateNote(ctx.fs, host, vault, {
@@ -221,10 +235,13 @@ export function registerObsidianChannelTools(ctx, getConfig, makeApprover) {
             excludes: getConfig().excludes,
             journalRetentionDays: getConfig().journalRetentionDays,
             argsSanitized: jsonSafe(args),
+            sandboxPolicy: policy,
             onApprove: (plan) => makeApprover(ctx, exec, toolName, plan),
           })
           return sizeOutcome(res)
         } catch (err) {
+          const hint = sandboxErrorOf(err, policy)
+          if (hint !== null) return errTurn(hint, 'SANDBOX_DENIED')
           return errTurn(err instanceof SafeError ? err.message : String(err?.message ?? err))
         }
       },
@@ -278,7 +295,7 @@ export function registerObsidianChannelTools(ctx, getConfig, makeApprover) {
       '.dsh-obsidian/trash with its full path recorded in the journal, so',
       'obsidian_undo or obsidian_restore can bring it back byte-identically.',
     ].join(' '),
-    parameters: { ...common('obsidian_note_delete', 'Note path relative to the vault root.') },
+    parameters: { ...common('obsidian_note_delete', 'Note path relative to the vault root.'), ...sandbox.schemaFields() },
     output: {
       schema: {
         type: 'object',
@@ -299,6 +316,8 @@ export function registerObsidianChannelTools(ctx, getConfig, makeApprover) {
       render: (_args, value) => textBlock('obsidian_note_delete -> ' + (value.action ?? '?') + (value.path ? ' / ' + value.path : '')),
     },
     async execute(args, exec) {
+      const { policy, policyError } = await resolveSandboxPolicy('obsidian_note_delete', args, exec)
+      if (policyError !== undefined) return errTurn(policyError)
       try {
         const vault = await vaultOf(ctx, getConfig, args)
         const res = await deleteNote(ctx.fs, host, vault, {
@@ -308,10 +327,13 @@ export function registerObsidianChannelTools(ctx, getConfig, makeApprover) {
           excludes: getConfig().excludes,
           journalRetentionDays: getConfig().journalRetentionDays,
           argsSanitized: jsonSafe(args),
+          sandboxPolicy: policy,
           onApprove: (plan) => makeApprover(ctx, exec, 'obsidian_note_delete', plan),
         })
         return sizeOutcome(res)
       } catch (err) {
+        const hint = sandboxErrorOf(err, policy)
+        if (hint !== null) return errTurn(hint, 'SANDBOX_DENIED')
         return errTurn(err instanceof SafeError ? err.message : String(err?.message ?? err))
       }
     },
@@ -335,6 +357,7 @@ export function registerObsidianChannelTools(ctx, getConfig, makeApprover) {
         description: 'Ordered list of operations, each with an action plus the parameters of the corresponding single tool.',
       },
       dryRun: { type: 'boolean', description: 'Preview the whole batch without writing or asking for approval.' },
+      ...sandbox.schemaFields(),
     },
     output: {
       schema: { type: 'object', additionalProperties: false, properties: {
@@ -347,6 +370,8 @@ export function registerObsidianChannelTools(ctx, getConfig, makeApprover) {
       render: (_args, value) => textBlock('obsidian_batch -> ' + ((value.results ?? []).length) + ' op(s), ok=' + value.ok),
     },
     async execute(args, exec) {
+      const { policy, policyError } = await resolveSandboxPolicy('obsidian_batch', args, exec)
+      if (policyError !== undefined) return errTurn(policyError)
       try {
         const vault = await vaultOf(ctx, getConfig, args)
         return cleanNulls(await batchMutate(ctx.fs, host, vault, {
@@ -355,9 +380,12 @@ export function registerObsidianChannelTools(ctx, getConfig, makeApprover) {
           sessionId: sessionIdOf(exec),
           excludes: getConfig().excludes,
           journalRetentionDays: getConfig().journalRetentionDays,
+          sandboxPolicy: policy,
           onApprove: (plan) => makeApprover(ctx, exec, plan.tool ?? 'obsidian_batch', plan),
         }))
       } catch (err) {
+        const hint = sandboxErrorOf(err, policy)
+        if (hint !== null) return errTurn(hint, 'SANDBOX_DENIED')
         return errTurn(err instanceof SafeError ? err.message : String(err?.message ?? err))
       }
     },
@@ -373,6 +401,7 @@ export function registerObsidianChannelTools(ctx, getConfig, makeApprover) {
         vaultDir: { type: 'string', description: 'Obsidian vault root directory. Omit to use the plugin-configured default.' },
         path: { type: 'string', description: 'Note path relative to the vault root (ignored when an opId is given).' },
         opId: { type: 'string', description: 'Exact journal operation id (from a previous result or obsidian_history).' },
+        ...sandbox.schemaFields(),
       },
       output: {
         schema: { type: 'object', additionalProperties: false, properties: {
@@ -386,13 +415,17 @@ export function registerObsidianChannelTools(ctx, getConfig, makeApprover) {
         render: (_args, value) => textBlock(toolName + ' -> ' + (value.action ?? '?') + (value.path ? ' / ' + value.path : '')),
       },
       async execute(args, exec) {
+        const { policy, policyError } = await resolveSandboxPolicy(toolName, args, exec)
+        if (policyError !== undefined) return errTurn(policyError)
         try {
           const vault = await vaultOf(ctx, getConfig, args)
           const res = opIdMode
-            ? await rollbackEntry(ctx.fs, host, vault, { opId: args.opId, sessionId: sessionIdOf(exec), journalRetentionDays: getConfig().journalRetentionDays })
-            : await rollbackEntry(ctx.fs, host, vault, { relPath: args.path, sessionId: sessionIdOf(exec), journalRetentionDays: getConfig().journalRetentionDays })
+            ? await rollbackEntry(ctx.fs, host, vault, { opId: args.opId, sessionId: sessionIdOf(exec), journalRetentionDays: getConfig().journalRetentionDays, sandboxPolicy: policy })
+            : await rollbackEntry(ctx.fs, host, vault, { relPath: args.path, sessionId: sessionIdOf(exec), journalRetentionDays: getConfig().journalRetentionDays, sandboxPolicy: policy })
           return cleanNulls(res)
         } catch (err) {
+          const hint = sandboxErrorOf(err, policy)
+          if (hint !== null) return errTurn(hint, 'SANDBOX_DENIED')
           return errTurn(err instanceof SafeError ? err.message : String(err?.message ?? err))
         }
       },
@@ -466,6 +499,7 @@ export function registerObsidianChannelTools(ctx, getConfig, makeApprover) {
     parameters: {
       vaultDir: { type: 'string', description: 'Obsidian vault root directory. Omit to use the plugin-configured default.' },
       path: { type: 'string', description: 'Original note path (as deleted).' },
+      ...sandbox.schemaFields(),
     },
     output: {
       schema: { type: 'object', additionalProperties: false, properties: {
@@ -479,10 +513,14 @@ export function registerObsidianChannelTools(ctx, getConfig, makeApprover) {
       render: (_args, value) => textBlock('obsidian_restore -> ' + (value.action ?? '?') + (value.path ? ' / ' + value.path : '')),
     },
     async execute(args, exec) {
+      const { policy, policyError } = await resolveSandboxPolicy('obsidian_restore', args, exec)
+      if (policyError !== undefined) return errTurn(policyError)
       try {
         const vault = await vaultOf(ctx, getConfig, args)
-        return cleanNulls(await restoreFromTrash(ctx.fs, host, vault, { relPath: args.path, sessionId: sessionIdOf(exec) }))
+        return cleanNulls(await restoreFromTrash(ctx.fs, host, vault, { relPath: args.path, sessionId: sessionIdOf(exec), sandboxPolicy: policy }))
       } catch (err) {
+        const hint = sandboxErrorOf(err, policy)
+        if (hint !== null) return errTurn(hint, 'SANDBOX_DENIED')
         return errTurn(err instanceof SafeError ? err.message : String(err?.message ?? err))
       }
     },

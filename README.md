@@ -61,10 +61,10 @@ diff、一键回滚（回滚本身也留痕，可再撤）。
 
 ## 开发与测试
 
-    node --test tests/engine.test.mjs   # 21 个安全内核单测（内存 fs，无依赖）
+    npm install                        # 安装 devDeps（tsdown + rc.6 运行时包，均来自 npm）
+    node --test tests/engine.test.mjs  # 21 个安全内核单测（内存 fs，无依赖）
     node tests/smoke.mjs               # 真实 rc.6 dsh-tools/schemastery 全链路冒烟
-                                       # （含 M2 settings/RPC 接线断言；需先按
-                                       #   scripts/link-runtime.sh 建立符号链接）
+                                       # （含 M2 settings/RPC 接线断言）
     npm run build                      # 构建 client 半（tsdown → lib/client.js）
 
 client 半是官方 bundle client 通道（package.json 的 dsh.client +

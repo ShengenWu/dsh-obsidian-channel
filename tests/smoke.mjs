@@ -30,8 +30,10 @@ class StubFs {
 const fs = new StubFs()
 fs.mkdirP('/vault')
 
-// config validation through the REAL schemastery
-const parsed = Config({ vaultDir: '/vault', writePolicy: 'per-write', excludes: [], journalRetentionDays: 30 })
+// config validation through the REAL schemastery.
+// NOTE: vaultDir starts EMPTY (mirroring cordis.patch.yml) so the smoke test
+// must prove the live settings seam supplies it — the exact bug that bit M2.
+const parsed = Config({ vaultDir: '', writePolicy: 'per-write', excludes: [], journalRetentionDays: 30 })
 console.log('Config parsed:', JSON.stringify(parsed))
 
 let approvalOutcome = 'allowed-once'
@@ -43,6 +45,7 @@ const registered = {}
 const scopes = {}
 const userSettings = {}
 const channels = {}
+const listeners = {}
 
 const ctx = {
   config: parsed,
@@ -80,15 +83,45 @@ const ctx = {
       intercept: () => async () => {},
     },
   },
-  // cordis-style optional inject: run cb when every named service is present
+  // cordis-style optional inject, ASYNC like the real runtime: the callback is
+  // scheduled, not run synchronously. This is what the old sync stub masked —
+  // it let `setSource` run before the tools captured `currentConfig`.
   inject: (names, cb) => {
-    if (names.every((n) => n in ctx)) cb(ctx)
+    if (names.every((n) => n in ctx)) queueMicrotask(() => cb(ctx))
   },
   // cordis fiber effect (fake): no-op disposer registration
   effect: () => () => {},
+  // event listener registry (fake): capture listeners so the fs write guard
+  // can be asserted directly.
+  on: (name, listener, options) => {
+    listeners[name] = listeners[name] ?? []
+    if (options?.prepend) listeners[name].unshift(listener)
+    else listeners[name].push(listener)
+    return () => {}
+  },
 }
 
 apply(ctx, parsed)
+
+// Flush the async inject so the settings namespace registers, then seed the
+// user layer with vaultDir (the real deployment reads this from settings.yaml).
+await Promise.resolve()
+if (scopes['dsh-obsidian-channel'] === undefined) throw new Error('settings namespace did not register after async inject')
+await scopes['dsh-obsidian-channel'].update({ vaultDir: '/vault' })
+console.log('settings scope seeded: vaultDir=/vault via live settings seam')
+
+// fs write guard: native write/edit into the vault must be rejected with a
+// tool-redirect message; writes outside the vault pass through untouched.
+{
+  const guard = (listeners['fs/write-intent'] ?? [])[0]
+  if (guard === undefined) throw new Error('fs/write-intent guard not registered')
+  let threw = null
+  try { await guard({ targetKey: '/vault/Notes/x.md' }, {}, async () => 'intent') } catch (e) { threw = e }
+  if (threw === null || !/obsidian_/.test(String(threw.message))) throw new Error('native vault write should be rejected: ' + JSON.stringify(threw))
+  const passed = await guard({ targetKey: '/elsewhere/x.md' }, {}, async () => 'intent')
+  if (passed !== 'intent') throw new Error('non-vault write should pass through: ' + JSON.stringify(passed))
+  console.log('fs write guard: native vault write rejected, outside write passes OK')
+}
 
 const names = Object.keys(registered).sort()
 console.log('registered tools (' + names.length + '):', names.join(', '))
@@ -119,6 +152,9 @@ function conform(schema, value, where) {
       }
     }
     for (const [k, sub] of Object.entries(schema.properties ?? {})) {
+      if (sub.required === true && (value[k] === undefined || value[k] === null)) {
+        throw new Error(where + ': missing required property "' + k + '"')
+      }
       if (value[k] !== undefined && value[k] !== null) conform(sub, value[k], where + '.' + k)
     }
   } else if (schema.type === 'array') {
@@ -196,6 +232,11 @@ if (denied.ok !== false) throw new Error('traversal not blocked')
   conform(registered['obsidian_batch'].output.schema, b1, 'batch-unknown')
   if (b1.ok !== false) throw new Error('batch-unknown shape wrong: ' + JSON.stringify(b1))
 
+  // batch dry-run -> the harness caught this live: the result MUST carry `action`
+  const bDry = await registered['obsidian_batch'].execute({ vaultDir: '/vault', dryRun: true, ops: [{ action: 'create', path: 'Batch/dry.md', content: 'x' }] }, exec)
+  conform(registered['obsidian_batch'].output.schema, bDry, 'batch-dry-run')
+  if (bDry.ok !== true || bDry.action !== 'batch' || !Array.isArray(bDry.results)) throw new Error('batch-dry-run shape wrong: ' + JSON.stringify(bDry))
+
   // restore with no deletion record -> error shape
   const rs1 = await registered['obsidian_restore'].execute({ vaultDir: '/vault', path: 'nope.md' }, exec)
   conform(registered['obsidian_restore'].output.schema, rs1, 'restore-missing')
@@ -221,6 +262,17 @@ if (denied.ok !== false) throw new Error('traversal not blocked')
   if (channels['/obsidian'].options.authority !== 'loopback') throw new Error('panel channel must be loopback-only')
   const rpc = channels['/obsidian'].handler
 
+  // config/get + config/set: the Settings page reads/writes config through the
+  // plugin's own RPC (settings.describe never exposes third-party namespaces).
+  const cfgGet = await rpc('config/get', {}, undefined)
+  if (cfgGet.ok !== true || cfgGet.value.vaultDir !== '/vault') throw new Error('config/get failed: ' + JSON.stringify(cfgGet))
+  console.log('rpc config/get:', JSON.stringify(cfgGet.value))
+
+  const cfgSet = await rpc('config/set', { field: 'writePolicy', value: 'auto' }, undefined)
+  if (cfgSet.ok !== true || cfgSet.value.writePolicy !== 'auto') throw new Error('config/set failed: ' + JSON.stringify(cfgSet))
+  await rpc('config/set', { field: 'writePolicy', value: 'per-write' }, undefined)
+  console.log('rpc config/set: writePolicy round-trip OK')
+
   const list = await rpc('history/list', { limit: 10 }, undefined)
   if (list.ok !== true || !Array.isArray(list.value.entries) || list.value.entries.length === 0) throw new Error('history/list failed: ' + JSON.stringify(list))
   console.log('rpc history/list:', list.value.entries.length, 'entries')
@@ -242,6 +294,12 @@ if (denied.ok !== false) throw new Error('traversal not blocked')
   if (bad.ok !== false || bad.error.code !== 'internal') throw new Error('unknown endpoint must fail with internal: ' + JSON.stringify(bad))
   console.log('rpc unknown endpoint: internal error OK')
 
+  // live settings vaultDir default: read with NO vaultDir must hit the seeded default
+  const rDefault = await registered['obsidian_read'].execute({ path: 'Notes/demo.md' }, exec)
+  conform(registered['obsidian_read'].output.schema, rDefault, 'read-default-vault')
+  if (rDefault.ok !== true || rDefault.path !== 'Notes/demo.md') throw new Error('settings vaultDir default not applied: ' + JSON.stringify(rDefault))
+  console.log('settings vaultDir default: read without vaultDir OK')
+
   // live settings switch: writePolicy auto must skip the approval seam entirely
   if (scopes['dsh-obsidian-channel'] === undefined) throw new Error('settings namespace not registered')
   await scopes['dsh-obsidian-channel'].update({ writePolicy: 'auto' })
@@ -251,6 +309,65 @@ if (denied.ok !== false) throw new Error('traversal not blocked')
   if (approvalCalls !== callsBefore) throw new Error('auto policy must not call the approval seam')
   await scopes['dsh-obsidian-channel'].update({ writePolicy: 'per-write' })
   console.log('live settings switch: auto write without approval OK')
+}
+
+// --- sandbox escalation wiring: confined fs must advertise escalation and map denial ---
+{
+  const escReg = {}
+  const escFs = new StubFs()
+  escFs.mkdirP('/vault')     // the workspace root
+  escFs.mkdirP('/outside')   // a vault OUTSIDE the workspace
+  escFs.sandboxMode = 'workspace-write'
+  const escBaseWrite = escFs.writeText.bind(escFs)
+  escFs.writeText = (target, content, expected, signal, policy) => {
+    const mode = policy?.mode ?? 'workspace-write'
+    if (mode === 'danger-full-access') return escBaseWrite(target, content, expected, signal)
+    if (!String(target.targetKey).startsWith('/vault')) {
+      const e = new Error('cannot write outside workspace')
+      e.code = 'FS_SANDBOX_DENIED'
+      throw e
+    }
+    return escBaseWrite(target, content, expected, signal)
+  }
+
+  const escCtx = {
+    fs: escFs,
+    tools: { register: (def) => { escReg[def.name] = def } },
+    approval: { request: async () => 'allowed-once' },
+    settings: {
+      register: (ns, schema, options) => ({
+        get: () => ({ ...(options?.base ?? {}) }),
+        watch: () => () => {},
+        update: async () => {},
+        replace: async () => {},
+      }),
+      describe: () => [],
+      get: () => undefined,
+    },
+    connection: { rpc: { handle: () => async () => {}, intercept: () => async () => {} } },
+    inject: (names, cb) => { if (names.every((n) => n in escCtx)) queueMicrotask(() => cb(escCtx)) },
+    effect: () => () => {},
+    on: () => () => {},
+    get: (n) => (n === 'sandboxPolicy' ? { defaultMode: 'workspace-write', resolve: () => ({ mode: 'workspace-write', workspaceRoot: '/vault' }) } : undefined),
+  }
+  apply(escCtx, Config({ vaultDir: '/outside', writePolicy: 'per-write', excludes: [], journalRetentionDays: 30 }))
+  await Promise.resolve()
+
+  const escCreate = escReg['obsidian_note_create']
+  const escParams = escCreate.parameters?.properties ?? {}
+  if (escParams.sandbox_permissions === undefined || escParams.justification === undefined) {
+    throw new Error('write tool must advertise sandbox_permissions/justification when confined')
+  }
+
+  const denied = await escCreate.execute({ vaultDir: '/outside', path: 'x.md', content: 'x' }, exec)
+  if (denied.ok !== false || denied.code !== 'SANDBOX_DENIED' || !/sandbox: escalation available/.test(denied.message ?? '')) {
+    throw new Error('outside-workspace write should map to the escalation hint: ' + JSON.stringify(denied))
+  }
+  console.log('sandbox escalation: denial mapped to hint OK')
+
+  const allowed = await escCreate.execute({ vaultDir: '/outside', path: 'x.md', content: 'x', sandbox_permissions: 'danger-full-access', justification: 'test write to the vault outside the workspace' }, exec)
+  if (allowed.ok !== true) throw new Error('escalated write should succeed: ' + JSON.stringify(allowed))
+  console.log('sandbox escalation: approved retry writes OK')
 }
 
 console.log('SMOKE OK — all tools register and the full pipeline works against rc.6')

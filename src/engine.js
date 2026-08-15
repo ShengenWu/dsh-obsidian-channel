@@ -276,21 +276,21 @@ function serializeEntry(entry) {
 }
 
 /** Write a journal entry (create) — writeText creates parent dirs on the local backend. */
-export async function writeJournalEntry(fs, vault, entry) {
+export async function writeJournalEntry(fs, vault, entry, sandboxPolicy) {
   const rel = journalRelPath(entry)
   const target = await fs.resolve(vault.vaultAbs + '/' + rel)
   const content = serializeEntry(entry)
   if (content.length > WRITE_SIZE_LIMIT) throw new SafeError('journal entry exceeds size limit', 'SIZE_LIMIT')
-  await fs.writeText(target, content, { kind: 'createIfAbsent' })
+  await fs.writeText(target, content, { kind: 'createIfAbsent' }, undefined, sandboxPolicy)
   return rel
 }
 
 /** Update an existing journal entry in place (status transition planned → done). */
-export async function updateJournalEntry(fs, vault, entry, prevVersion) {
+export async function updateJournalEntry(fs, vault, entry, prevVersion, sandboxPolicy) {
   const rel = journalRelPath(entry)
   const target = await fs.resolve(vault.vaultAbs + '/' + rel)
   const expected = prevVersion === undefined ? undefined : { kind: 'replaceIfVersion', version: prevVersion }
-  await fs.writeText(target, serializeEntry(entry), expected)
+  await fs.writeText(target, serializeEntry(entry), expected, undefined, sandboxPolicy)
 }
 
 async function safeListDir(fs, target) {
@@ -456,7 +456,7 @@ export async function mutateNote(fs, host, vault, opts) {
     afterHash: null,
     args: { ...(opts.argsSanitized ?? {}) },
   }
-  await writeJournalEntry(fs, vault, entry)
+  await writeJournalEntry(fs, vault, entry, opts.sandboxPolicy)
 
   try {
     // Guard against the version the model SAW (baseVersion from obsidian_read),
@@ -466,12 +466,12 @@ export async function mutateNote(fs, host, vault, opts) {
     const intent = kind === 'create'
       ? { kind: 'createIfAbsent' }
       : { kind: 'replaceIfVersion', version: guardVersion }
-    const outcomeWrite = await fs.writeText(loc.target, nextText, intent)
+    const outcomeWrite = await fs.writeText(loc.target, nextText, intent, undefined, opts.sandboxPolicy)
     entry.status = 'done'
     entry.afterHash = nextHash
     entry.before = outcomeWrite.before ?? entry.before
     entry.after = outcomeWrite.after
-    await updateJournalEntry(fs, vault, entry)
+    await updateJournalEntry(fs, vault, entry, undefined, opts.sandboxPolicy)
     await pruneJournal(fs, host, vault, opts.journalRetentionDays ?? 30)
     return {
       ok: true,
@@ -542,12 +542,12 @@ export async function deleteNote(fs, host, vault, opts) {
     trashRel,
     args: { ...(opts.argsSanitized ?? {}) },
   }
-  await writeJournalEntry(fs, vault, entry)
+  await writeJournalEntry(fs, vault, entry, opts.sandboxPolicy)
   const trashAbs = vault.vaultAbs + '/' + trashRel
   await host.mkdirP(trashAbs.slice(0, trashAbs.lastIndexOf('/')))
   await host.rename(loc.abs, trashAbs)
   entry.status = 'done'
-  await updateJournalEntry(fs, vault, entry)
+  await updateJournalEntry(fs, vault, entry, undefined, opts.sandboxPolicy)
   await pruneJournal(fs, host, vault, opts.journalRetentionDays ?? 30)
   return { ok: true, action: 'delete', path: relPath, opId, trashRel, beforeHash, afterHash: null, message: 'moved to trash (opId ' + opId + ')' }
 }
@@ -561,7 +561,7 @@ export async function deleteNote(fs, host, vault, opts) {
  * (undo). Inverse ops are themselves journaled (kind undo/rollback) so every
  * rollback is re-doable.
  */
-export async function rollbackEntry(fs, host, vault, { relPath, opId, journalRetentionDays = 30, sessionId }) {
+export async function rollbackEntry(fs, host, vault, { relPath, opId, journalRetentionDays = 30, sessionId, sandboxPolicy }) {
   const entry = opId !== undefined
     ? await journalEntry(fs, vault, opId)
     : await latestDoneEntry(fs, vault, relPath)
@@ -605,7 +605,7 @@ export async function rollbackEntry(fs, host, vault, { relPath, opId, journalRet
     targetOpId: entry.opId,
     args: { opId: entry.opId },
   }
-  await writeJournalEntry(fs, vault, rollbackEntryBase)
+  await writeJournalEntry(fs, vault, rollbackEntryBase, sandboxPolicy)
 
   let message
   if (entry.kind === 'create') {
@@ -626,13 +626,13 @@ export async function rollbackEntry(fs, host, vault, { relPath, opId, journalRet
     const intent = statInfo === undefined
       ? { kind: 'createIfAbsent' }
       : { kind: 'replaceIfVersion', version: statInfo.version }
-    const outcomeWrite = await fs.writeText(loc.target, beforeText, intent)
+    const outcomeWrite = await fs.writeText(loc.target, beforeText, intent, undefined, sandboxPolicy)
     rollbackEntryBase.afterHash = sha256(beforeText)
     rollbackEntryBase.after = outcomeWrite.after
     message = 'content restored to the pre-operation image'
   }
   rollbackEntryBase.status = 'done'
-  await updateJournalEntry(fs, vault, rollbackEntryBase)
+  await updateJournalEntry(fs, vault, rollbackEntryBase, undefined, sandboxPolicy)
   await pruneJournal(fs, host, vault, journalRetentionDays)
   return { ok: true, action: undoKind, path: targetRel, opId: rollbackOpId, message }
 }
@@ -640,7 +640,7 @@ export async function rollbackEntry(fs, host, vault, { relPath, opId, journalRet
 /**
  * Restore a previously deleted note from trash (explicit restore tool).
  */
-export async function restoreFromTrash(fs, host, vault, { relPath, sessionId }) {
+export async function restoreFromTrash(fs, host, vault, { relPath, sessionId, sandboxPolicy }) {
   const rel = sanitizeRelPath(relPath)
   const entries = await listJournal(fs, vault, { relPath: rel, limit: 200 })
   const deleted = entries.find((e) => e.kind === 'delete' && e.status === 'done' && e.trashRel !== undefined)
@@ -672,7 +672,7 @@ export async function restoreFromTrash(fs, host, vault, { relPath, sessionId }) 
     targetOpId: deleted.opId,
     args: { path: rel },
   }
-  await writeJournalEntry(fs, vault, entry)
+  await writeJournalEntry(fs, vault, entry, sandboxPolicy)
   return { ok: true, action: 'restore', path: rel, opId, message: 'note restored from trash' }
 }
 
@@ -758,7 +758,7 @@ function overlayFs(fs, overlay) {
  * entry. A failed op aborts the batch and reports what ran. dryRun projects
  * earlier ops through an overlay so dependent sequences preview correctly.
  */
-export async function batchMutate(fs, host, vault, { ops = [], dryRun = false, sessionId, onApprove, excludes, journalRetentionDays }) {
+export async function batchMutate(fs, host, vault, { ops = [], dryRun = false, sessionId, onApprove, excludes, journalRetentionDays, sandboxPolicy }) {
   if (!Array.isArray(ops) || ops.length === 0) {
     throw new SafeError('batch requires at least one operation', 'INVALID_ARGS')
   }
@@ -769,10 +769,10 @@ export async function batchMutate(fs, host, vault, { ops = [], dryRun = false, s
     const { action, path, ...rest } = op
     let res
     if (action === 'delete') {
-      res = await deleteNote(effectiveFs, host, vault, { ...rest, rel: path, sessionId, onApprove, excludes, journalRetentionDays, dryRun })
+      res = await deleteNote(effectiveFs, host, vault, { ...rest, rel: path, sessionId, onApprove, excludes, journalRetentionDays, dryRun, sandboxPolicy })
       if (dryRun && res.ok) overlay.set(vault.vaultAbs + '/' + path, null)
     } else if (action === 'create' || action === 'update' || action === 'append') {
-      res = await mutateNote(effectiveFs, host, vault, { ...rest, rel: path, kind: action, tool: 'obsidian_batch:' + action, sessionId, onApprove, excludes, journalRetentionDays, dryRun })
+      res = await mutateNote(effectiveFs, host, vault, { ...rest, rel: path, kind: action, tool: 'obsidian_batch:' + action, sessionId, onApprove, excludes, journalRetentionDays, dryRun, sandboxPolicy })
       if (dryRun && res.ok && res.action === 'dry-run' && res.plan !== undefined) {
         overlay.set(vault.vaultAbs + '/' + path, res.plan.after ?? '')
       }
@@ -781,8 +781,8 @@ export async function batchMutate(fs, host, vault, { ops = [], dryRun = false, s
     }
     results.push(res)
     if (!res.ok && !dryRun) {
-      return { ok: false, results, message: 'batch aborted at op ' + (results.length - 1) + ': ' + res.message }
+      return { ok: false, action: 'batch', results, message: 'batch aborted at op ' + (results.length - 1) + ': ' + res.message }
     }
   }
-  return { ok: true, results }
+  return { ok: true, action: 'batch', results }
 }

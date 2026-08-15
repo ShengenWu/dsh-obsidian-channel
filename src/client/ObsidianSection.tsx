@@ -2,19 +2,20 @@
  * settings.section component: Obsidian vault configuration + change-history
  * panel with per-entry diff and one-click rollback.
  *
- * Data channels (all official seams):
- *   - config read/write: settingsScope bound to the host namespace
- *     'dsh-obsidian-channel' (host: installSettingsSection); writes persist to
- *     the settings document and apply live on the host.
- *   - journal read/rollback: the /obsidian connection RPC channel the host
- *     mounts (history/list, history/entry, history/rollback, vault/check).
- *     Panel rollback runs directly — the button click IS the authorization
- *     (ctx.approval requires an agent + open turn, which a UI click has not;
- *     every rollback is itself journaled and re-undoable).
+ * Data channels:
+ *   - config read/write: the /obsidian connection RPC channel the host mounts
+ *     (config/get, config/set). Host persistence goes through the official
+ *     settings.update seam. 【DSH 尚未适配】客户端不能走官方 settingsScope，
+ *     因为 DSH host-apiproxy 的 settings.describe 白名单不暴露第三方 namespace；
+ *     待 DSH 支持第三方 namespace 暴露后应改回 settingsScope。
+ *   - journal read/rollback: the same /obsidian RPC (history/list,
+ *     history/entry, history/rollback, vault/check). Panel rollback runs
+ *     directly — the button click IS the authorization (ctx.approval requires
+ *     an agent + open turn, which a UI click has not; every rollback is itself
+ *     journaled and re-undoable).
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { SettingsScope } from '@deepseek-ai/dsh-client-runtime/client'
 import { NS, type ObsidianKey } from './locales.ts'
 
 interface ObsidianConfig {
@@ -47,7 +48,6 @@ type RpcFn = (endpoint: string, payload?: unknown) => Promise<RpcResult<unknown>
 
 export type SectionProps = PropsRuntime<'settings.section'> & PropsLocale<typeof NS> & {
   rpc: RpcFn
-  scope: SettingsScope<ObsidianConfig>
 }
 
 
@@ -132,11 +132,21 @@ function seatStyle() {
   document.head.appendChild(style)
 }
 
-export function ObsidianSettingsSection({ t, close, rpc, scope }: SectionProps) {
+export function ObsidianSettingsSection({ t, close, rpc }: SectionProps) {
   seatStyle()
 
-  const [cfg, setCfg] = useState(() => scope.getSnapshot())
-  useEffect(() => scope.subscribe(() => { setCfg(scope.getSnapshot()) }), [scope])
+  const [cfg, setCfg] = useState<ObsidianConfig | null>(null)
+  const [cfgStatus, setCfgStatus] = useState<'loading' | 'ready' | 'unavailable'>('loading')
+  const loadConfig = useCallback(async () => {
+    const res = await rpc('config/get')
+    if (res.ok) {
+      setCfg(res.value as ObsidianConfig)
+      setCfgStatus('ready')
+    } else {
+      setCfgStatus('unavailable')
+    }
+  }, [rpc])
+  useEffect(() => { void loadConfig() }, [loadConfig])
 
   const [entries, setEntries] = useState<Entry[]>([])
   const [selected, setSelected] = useState<FullEntry | null>(null)
@@ -201,13 +211,13 @@ export function ObsidianSettingsSection({ t, close, rpc, scope }: SectionProps) 
   }
 
   const setField = (field: keyof ObsidianConfig, value: unknown) => {
-    void scope.set(field as string, value).catch((err: unknown) => {
-      setRollbackMsg({ kind: 'err', text: String((err as { message?: string })?.message ?? err) })
+    void rpc('config/set', { field, value }).then((res) => {
+      if (res.ok) setCfg(res.value as ObsidianConfig)
+      else setRollbackMsg({ kind: 'err', text: res.error.message })
     })
   }
 
-  const snapshotValue = cfg.value
-  const cfgStatus = cfg.status
+  const snapshotValue = cfg
 
   return (
     <div className="obs-section">
