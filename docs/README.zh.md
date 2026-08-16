@@ -85,3 +85,5 @@ vault 会话默认会走 **Obsidian 模式**：不干涉其他工作空间的模
 [MIT](../LICENSE)
 
 欢迎大家提issue：<https://github.com/ShengenWu/dsh-obsidian-channel/issues>
+
+本仓库代码使用 dsh、Grok 4.6 以及 DeepSeek-v4-Pro-0813 构建。

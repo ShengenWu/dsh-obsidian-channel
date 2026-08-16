@@ -83,3 +83,5 @@ Known gap: `bash` can still rewrite files and skip the journal. Be careful in a 
 [MIT](LICENSE)
 
 Issues welcome: <https://github.com/ShengenWu/dsh-obsidian-channel/issues>
+
+This repo was built with dsh, Grok 4.6, and DeepSeek-v4-Pro-0813.
