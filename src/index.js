@@ -2,7 +2,9 @@ import z from '@deepseek-ai/schemastery'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { ESCALATION_TARGETS, approveEscalation, escalationHintMarker, sandboxDenialMarker, validateEscalationArgs } from '@deepseek-ai/dsh-sandbox'
 import { registerObsidianChannelTools, hostOf } from './tools.js'
-import { openVault, listJournal, journalEntry, rollbackEntry } from './engine.js'
+import { openVault, listJournal, journalEntry, rollbackEntry, surfaceOverview, loadDailyHabit } from './engine.js'
+import { installVaultPrompt, shouldDefaultObsidianPreset } from './prompt.js'
+import { OBSIDIAN_PRESET_ID, syncObsidianPreset } from './preset-sync.js'
 
 export const name = 'dsh-obsidian-channel'
 export const inject = ['tools', 'fs', 'approval']
@@ -16,6 +18,10 @@ export const Config = z.object({
     .description('额外禁止访问的目录名（总是叠加内置名单：.obsidian / .git / .dsh-obsidian / .trash）。'),
   journalRetentionDays: z.number().default(30)
     .description('journal 保留天数（超期的条目在写入时被清理）。'),
+  dailyFolder: z.string().default('')
+    .description('每日笔记目录（相对 vault）。留空则读取 .obsidian/daily-notes.json，再不行用 Daily。'),
+  dailyFormat: z.string().default('')
+    .description('每日笔记文件名日期格式（Moment 记号，如 MM-DD-YYYY）。留空则读取 Obsidian 设置，再不行用 YYYY-MM-DD。'),
 })
 
 const NS = settingsNamespace('dsh-obsidian-channel')
@@ -45,6 +51,8 @@ function configView(cfg) {
     writePolicy: cfg.writePolicy ?? 'per-write',
     excludes: cfg.excludes ?? [],
     journalRetentionDays: cfg.journalRetentionDays ?? 30,
+    dailyFolder: cfg.dailyFolder ?? '',
+    dailyFormat: cfg.dailyFormat ?? '',
   }
 }
 
@@ -189,7 +197,47 @@ export function apply(ctx, config) {
     },
   }
 
+  let lastDaily = null
+  const refreshDaily = async () => {
+    const cfg = currentConfig()
+    if (!cfg.vaultDir) {
+      lastDaily = null
+      return null
+    }
+    try {
+      const vault = await openVault(ctx.fs, cfg.vaultDir)
+      lastDaily = await loadDailyHabit(ctx.fs, vault, cfg)
+      return lastDaily
+    } catch {
+      lastDaily = null
+      return null
+    }
+  }
+
   registerObsidianChannelTools(ctx, currentConfig, makeApprover, sandbox)
+  installVaultPrompt(ctx, currentConfig, () => lastDaily)
+  void refreshDaily()
+
+  try {
+    syncObsidianPreset()
+  } catch (err) {
+    console.warn('[dsh-obsidian-channel] failed to sync Obsidian preset:', err?.message ?? err)
+  }
+
+  // Vault workspace default: only BLANK agents whose cwd is the bound vault
+  // join Obsidian 模式. Recompose is the blank-session contract — applying it
+  // to a session that already ran would swap tools under existing history.
+  ctx.inject(['agentPresets'], (pctx) => {
+    pctx.on('agent/created', (payload) => {
+      const agent = payload?.agent
+      if (agent === undefined) return
+      const current = pctx.agentPresets.composedPreset(agent.ctx)
+      if (!shouldDefaultObsidianPreset(agent, currentConfig().vaultDir, current, OBSIDIAN_PRESET_ID)) return
+      void pctx.agentPresets.recompose(agent.ctx, OBSIDIAN_PRESET_ID).catch((error) => {
+        console.warn('[dsh-obsidian-channel] could not default vault session to Obsidian preset:', error?.message ?? error)
+      })
+    })
+  })
 
   ctx.inject(['connection'], (cctx) => {
     const host = hostOf()
@@ -200,14 +248,18 @@ export function apply(ctx, config) {
         // Config endpoints do not need a readable vault (first-run setup has
         // none yet) and are served before any vault is opened.
         if (endpoint === 'config/get') {
-          return { ok: true, value: configView(cfg) }
+          const view = configView(cfg)
+          view.daily = await refreshDaily()
+          return { ok: true, value: view }
         }
         if (endpoint === 'config/set') {
           const field = typeof p?.field === 'string' ? p.field : ''
           if (field === '') return rpcError('config/set requires a field')
           if (settingsScope === null) return rpcError('settings service is not available')
           await settingsScope.update({ [field]: p?.value })
-          return { ok: true, value: configView(currentConfig()) }
+          const view = configView(currentConfig())
+          view.daily = await refreshDaily()
+          return { ok: true, value: view }
         }
         const vault = await openVault(ctx.fs, cfg.vaultDir)
         switch (endpoint) {
@@ -247,6 +299,16 @@ export function apply(ctx, config) {
               topLevel = Array.isArray(children) ? children.length : null
             } catch { topLevel = null }
             return { ok: true, value: { vault: vault.vaultAbs, topLevel } }
+          }
+          case 'surface/overview': {
+            const overview = await surfaceOverview(ctx.fs, vault, {
+              excludes: cfg.excludes ?? [],
+              host,
+              dailyFolder: cfg.dailyFolder,
+              dailyFormat: cfg.dailyFormat,
+            })
+            lastDaily = overview.daily ?? lastDaily
+            return { ok: true, value: overview }
           }
           default:
             return rpcError('unknown /obsidian endpoint: ' + endpoint)

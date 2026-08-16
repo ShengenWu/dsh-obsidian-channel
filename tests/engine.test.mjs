@@ -8,6 +8,8 @@ import {
   renderFrontmatter, applyFrontmatterEdit, computeNextText,
   mutateNote, deleteNote, batchMutate,
   listJournal, latestDoneEntry, rollbackEntry, restoreFromTrash,
+  pickDailyPath, walkVaultNotes, surfaceOverview, todayStamp,
+  formatDailyName, dailyRelPath, loadDailyHabit,
 } from '../src/engine.js'
 
 const NL = '\n'
@@ -22,6 +24,7 @@ class StubFs {
     this.dirs = new Set()
     this.symlinks = new Set()
     this.versions = new Map()
+    this.mtimes = new Map()
   }
   norm(p) { return p.replace(/\\+/g, '/') }
   ensureDirs(p) {
@@ -44,7 +47,9 @@ class StubFs {
   stat(target) {
     const p = target.targetKey
     if (this.files.has(p)) {
-      return { version: this.versions.get(p) ?? 0, type: 'file', size: this.files.get(p).length }
+      const info = { version: this.versions.get(p) ?? 0, type: 'file', size: this.files.get(p).length }
+      if (this.mtimes.has(p)) info.mtimeMs = this.mtimes.get(p)
+      return info
     }
     if (this.dirs.has(p)) return { version: 0, type: 'directory' }
     return undefined
@@ -140,6 +145,7 @@ class StubFs {
       rename: (a, b) => this.rename(a, b),
       mkdirP: (d) => this.mkdirP(d),
       rmrf: (d) => this.rmrf(d),
+      mtimeMs: async (abs) => this.mtimes.get(this.norm(abs)) ?? 0,
     }
   }
 }
@@ -471,4 +477,99 @@ test('journal pruning removes old day directories', async () => {
   await mutateNote(fs, host, vault, opts({ rel: 'a.md', kind: 'create', content: 'x', tool: 't', onApprove: allow, journalRetentionDays: 0 }))
   const all = await listJournal(fs, vault, {})
   assert.equal(all.length, 0)
+})
+
+test('formatDailyName follows Obsidian Moment tokens', () => {
+  const noon = new Date(2026, 7, 16, 12, 0, 0).getTime()
+  assert.equal(formatDailyName(noon, 'YYYY-MM-DD'), '2026-08-16')
+  assert.equal(formatDailyName(noon, 'MM-DD-YYYY'), '08-16-2026')
+  assert.equal(formatDailyName(noon, 'DD-MM-YYYY'), '16-08-2026')
+  assert.equal(dailyRelPath('Daily', '08-16-2026'), 'Daily/08-16-2026.md')
+})
+
+test('pickDailyPath matches the expected path only', () => {
+  assert.equal(pickDailyPath(['Inbox/x.md'], 'Daily/08-16-2026.md'), null)
+  assert.equal(pickDailyPath(['Daily/16-08-2026.md', 'Daily/08-16-2026.md'], 'Daily/08-16-2026.md'), 'Daily/08-16-2026.md')
+  assert.equal(pickDailyPath(['Daily/16-08-2026.md'], 'Daily/08-16-2026.md'), null)
+})
+
+test('loadDailyHabit reads .obsidian/daily-notes.json', async () => {
+  const { fs, vault } = await setup()
+  fs.ensureDirs('/vault/.obsidian')
+  fs.files.set('/vault/.obsidian/daily-notes.json', JSON.stringify({ format: 'MM-DD-YYYY', folder: 'Daily', template: '' }))
+  const noon = new Date(2026, 7, 16, 12, 0, 0).getTime()
+  const habit = await loadDailyHabit(fs, vault, {}, noon)
+  assert.equal(habit.source, 'obsidian')
+  assert.equal(habit.format, 'MM-DD-YYYY')
+  assert.equal(habit.folder, 'Daily')
+  assert.equal(habit.todayRel, 'Daily/08-16-2026.md')
+})
+
+test('walkVaultNotes skips hidden/excluded dirs and lists markdown', async () => {
+  const { fs, vault } = await setup()
+  fs.files.set('/vault/Notes/a.md', '# A')
+  fs.files.set('/vault/Notes/skip.txt', 'no')
+  fs.files.set('/vault/.obsidian/app.json', '{}')
+  fs.files.set('/vault/.git/HEAD', 'ref')
+  fs.ensureDirs('/vault/Notes')
+  fs.ensureDirs('/vault/.obsidian')
+  fs.ensureDirs('/vault/.git')
+  const { notes, truncated } = await walkVaultNotes(fs, vault, { excludes: [] })
+  assert.equal(truncated, false)
+  assert.deepEqual(notes.map((n) => n.rel).sort(), ['Notes/a.md'])
+})
+
+test('surfaceOverview reports today, recent, changes, and broken links', async () => {
+  const { fs, host, vault, allow } = await setup()
+  const date = todayStamp()
+  await mutateNote(fs, host, vault, opts({
+    rel: 'Daily/' + date + '.md', kind: 'create', content: '# Today\nSee [[Missing Note]] and [[Hub]].',
+    tool: 't', onApprove: allow,
+  }))
+  await mutateNote(fs, host, vault, opts({
+    rel: 'Hub.md', kind: 'create', content: '# Hub',
+    tool: 't', onApprove: allow,
+  }))
+  const overview = await surfaceOverview(fs, vault, { excludes: [] })
+  assert.equal(overview.today?.path, 'Daily/' + date + '.md')
+  assert.equal(overview.today?.title, 'Today')
+  assert.equal(overview.noteCount, 2)
+  assert.ok(overview.recent.some((n) => n.path === 'Hub.md'))
+  assert.ok(overview.changes.length >= 2)
+  assert.equal(overview.brokenCount, 1)
+  assert.equal(overview.broken[0].target, 'Missing Note')
+  assert.equal(overview.broken[0].from, 'Daily/' + date + '.md')
+})
+
+test('surfaceOverview today follows Obsidian MM-DD-YYYY, not the swapped name', async () => {
+  const { fs, host, vault, allow } = await setup()
+  fs.ensureDirs('/vault/.obsidian')
+  fs.files.set('/vault/.obsidian/daily-notes.json', JSON.stringify({ format: 'MM-DD-YYYY', folder: 'Daily' }))
+  const stamp = formatDailyName(Date.now(), 'MM-DD-YYYY')
+  const swapped = formatDailyName(Date.now(), 'DD-MM-YYYY')
+  await mutateNote(fs, host, vault, opts({
+    rel: 'Daily/' + swapped + '.md', kind: 'create', content: '# wrong order',
+    tool: 't', onApprove: allow,
+  }))
+  const missing = await surfaceOverview(fs, vault, { excludes: [] })
+  assert.equal(missing.todayRel, 'Daily/' + stamp + '.md')
+  assert.equal(missing.today, null)
+  await mutateNote(fs, host, vault, opts({
+    rel: 'Daily/' + stamp + '.md', kind: 'create', content: '# correct',
+    tool: 't', onApprove: allow,
+  }))
+  const found = await surfaceOverview(fs, vault, { excludes: [] })
+  assert.equal(found.today?.path, 'Daily/' + stamp + '.md')
+})
+
+test('surfaceOverview recent is newest-mtime first, not walk/name order', async () => {
+  const { fs, host, vault } = await setup()
+  fs.files.set('/vault/0.md', '# Zero')
+  fs.files.set('/vault/1.md', '# One')
+  fs.files.set('/vault/2.md', '# Two')
+  fs.mtimes.set('/vault/0.md', 1000)
+  fs.mtimes.set('/vault/1.md', 3000)
+  fs.mtimes.set('/vault/2.md', 2000)
+  const overview = await surfaceOverview(fs, vault, { excludes: [], host })
+  assert.deepEqual(overview.recent.map((n) => n.path), ['1.md', '2.md', '0.md'])
 })

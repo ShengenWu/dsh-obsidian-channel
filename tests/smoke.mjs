@@ -91,6 +91,10 @@ const ctx = {
   },
   // cordis fiber effect (fake): no-op disposer registration
   effect: () => () => {},
+  systemPrompt: {
+    section: (s) => { registered['__section:' + s.name] = s },
+    context: (c) => { registered['__context:' + c.name] = c },
+  },
   // event listener registry (fake): capture listeners so the fs write guard
   // can be asserted directly.
   on: (name, listener, options) => {
@@ -109,6 +113,15 @@ await Promise.resolve()
 if (scopes['dsh-obsidian-channel'] === undefined) throw new Error('settings namespace did not register after async inject')
 await scopes['dsh-obsidian-channel'].update({ vaultDir: '/vault' })
 console.log('settings scope seeded: vaultDir=/vault via live settings seam')
+if (registered['__section:dsh-obsidian-channel:vault'] === undefined) throw new Error('vault systemPrompt section not registered')
+if (registered['__context:dsh-obsidian-channel:vault'] === undefined) throw new Error('vault systemPrompt context not registered')
+{
+  const section = registered['__section:dsh-obsidian-channel:vault']
+  const inVault = section.text({ agent: { session: { header: { cwd: '/vault' } } } })
+  const outVault = section.text({ agent: { session: { header: { cwd: '/elsewhere' } } } })
+  if (!/obsidian_note_create/.test(inVault) || outVault !== '') throw new Error('vault prompt must be vault-session only')
+  console.log('systemPrompt vault guidance: vault-only OK')
+}
 
 // fs write guard: native write/edit into the vault must be rejected with a
 // tool-redirect message; writes outside the vault pass through untouched.
@@ -289,6 +302,21 @@ if (denied.ok !== false) throw new Error('traversal not blocked')
   const check = await rpc('vault/check', {}, undefined)
   if (check.ok !== true || check.value.vault !== '/vault') throw new Error('vault/check failed: ' + JSON.stringify(check))
   console.log('rpc vault/check:', JSON.stringify(check.value))
+
+  const overview = await rpc('surface/overview', {}, undefined)
+  if (overview.ok !== true || overview.value.vault !== '/vault') throw new Error('surface/overview failed: ' + JSON.stringify(overview))
+  if (!Array.isArray(overview.value.recent) || !Array.isArray(overview.value.changes) || !Array.isArray(overview.value.broken)) {
+    throw new Error('surface/overview shape wrong: ' + JSON.stringify(overview.value))
+  }
+  if (typeof overview.value.todayDate !== 'string' || typeof overview.value.noteCount !== 'number') {
+    throw new Error('surface/overview missing todayDate/noteCount: ' + JSON.stringify(overview.value))
+  }
+  console.log('rpc surface/overview:', JSON.stringify({
+    noteCount: overview.value.noteCount,
+    today: overview.value.today?.path ?? null,
+    changes: overview.value.changes.length,
+    broken: overview.value.brokenCount,
+  }))
 
   const bad = await rpc('nope', {}, undefined)
   if (bad.ok !== false || bad.error.code !== 'internal') throw new Error('unknown endpoint must fail with internal: ' + JSON.stringify(bad))

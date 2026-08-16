@@ -786,3 +786,287 @@ export async function batchMutate(fs, host, vault, { ops = [], dryRun = false, s
   }
   return { ok: true, action: 'batch', results }
 }
+
+// ---------------------------------------------------------------------------
+// Surface overview (今日 / 最近 / 变更 / 断链) — panel data, not a tool
+// ---------------------------------------------------------------------------
+
+const WALK_FILE_LIMIT = 4000
+const NOTE_READ_CAP = 512 * 1024
+
+const DEFAULT_DAILY_FORMAT = 'YYYY-MM-DD'
+const DEFAULT_DAILY_FOLDER = 'Daily'
+
+/** YYYY-MM-DD in local time (fallback when no format is configured). */
+export function todayStamp(now = Date.now()) {
+  return formatDailyName(now, DEFAULT_DAILY_FORMAT)
+}
+
+/**
+ * Format a local date with Obsidian/Moment tokens used by daily-notes.json:
+ * YYYY YY MM M DD D. Longer tokens win.
+ */
+export function formatDailyName(now, format) {
+  const d = new Date(now)
+  const YYYY = String(d.getFullYear())
+  const YY = YYYY.slice(-2)
+  const M = String(d.getMonth() + 1)
+  const MM = pad(d.getMonth() + 1)
+  const D = String(d.getDate())
+  const DD = pad(d.getDate())
+  const spec = (typeof format === 'string' && format.trim() !== '') ? format.trim() : DEFAULT_DAILY_FORMAT
+  return spec
+    .replace(/YYYY/g, YYYY)
+    .replace(/YY/g, YY)
+    .replace(/MM/g, MM)
+    .replace(/DD/g, DD)
+    .replace(/M/g, M)
+    .replace(/D/g, D)
+}
+
+export function dailyRelPath(folder, stamp) {
+  const name = stamp + '.md'
+  const dir = typeof folder === 'string' ? folder.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '') : ''
+  return dir === '' ? name : dir + '/' + name
+}
+
+/**
+ * Privileged read of .obsidian/daily-notes.json (not available to model tools).
+ * Returns null when the file is missing or invalid.
+ */
+export async function readDailyNotesSetting(fs, vault) {
+  try {
+    const target = await fs.resolve(vault.vaultAbs + '/.obsidian/daily-notes.json')
+    const info = await fs.stat(target)
+    if (info === undefined || info.type !== 'file') return null
+    const json = JSON.parse(await fs.readText(target))
+    if (json === null || typeof json !== 'object' || Array.isArray(json)) return null
+    return {
+      folder: typeof json.folder === 'string' ? json.folder : '',
+      format: typeof json.format === 'string' && json.format.trim() !== '' ? json.format.trim() : DEFAULT_DAILY_FORMAT,
+      template: typeof json.template === 'string' ? json.template : '',
+    }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Resolve daily folder/format: plugin override if set, else Obsidian's file,
+ * else Daily + YYYY-MM-DD.
+ */
+export async function loadDailyHabit(fs, vault, cfg = {}, now = Date.now()) {
+  const overrideFolder = typeof cfg.dailyFolder === 'string' ? cfg.dailyFolder.trim() : ''
+  const overrideFormat = typeof cfg.dailyFormat === 'string' ? cfg.dailyFormat.trim() : ''
+  const fromOb = await readDailyNotesSetting(fs, vault)
+  let folder = DEFAULT_DAILY_FOLDER
+  let format = DEFAULT_DAILY_FORMAT
+  let source = 'default'
+  let template = ''
+  if (fromOb !== null) {
+    folder = fromOb.folder
+    format = fromOb.format
+    template = fromOb.template
+    source = 'obsidian'
+  }
+  if (overrideFolder !== '') {
+    folder = overrideFolder
+    source = source === 'obsidian' ? 'override' : 'override'
+  }
+  if (overrideFormat !== '') {
+    format = overrideFormat
+    source = 'override'
+  }
+  const stamp = formatDailyName(now, format)
+  return {
+    folder,
+    format,
+    template,
+    source,
+    stamp,
+    todayRel: dailyRelPath(folder, stamp),
+  }
+}
+
+/** Exact expected daily path, or null. */
+export function pickDailyPath(rels, expectedRel) {
+  if (typeof expectedRel !== 'string' || expectedRel === '') return null
+  return rels.includes(expectedRel) ? expectedRel : null
+}
+
+/** Walk vault markdown notes, skipping hidden / excluded directories. */
+export async function walkVaultNotes(fs, vault, { excludes = [], fileLimit = WALK_FILE_LIMIT } = {}) {
+  const notes = []
+  let truncated = false
+  const queue = ['']
+  while (queue.length > 0) {
+    if (notes.length >= fileLimit) { truncated = true; break }
+    const relDir = queue.shift()
+    const abs = relDir === '' ? vault.vaultAbs : vault.vaultAbs + '/' + relDir
+    const target = await fs.resolve(abs)
+    const children = await safeListDir(fs, target)
+    for (const child of children) {
+      if (typeof child.name !== 'string' || child.name.startsWith('.')) continue
+      const rel = relDir === '' ? child.name : relDir + '/' + child.name
+      if (child.type === 'directory') {
+        if (relExcluded(rel, excludes)) continue
+        queue.push(rel)
+      } else if (child.type === 'file' && child.name.endsWith('.md')) {
+        if (notes.length >= fileLimit) { truncated = true; break }
+        notes.push({ rel, target: child.target })
+      }
+    }
+  }
+  return { notes, truncated }
+}
+
+function stemOf(rel) {
+  return rel.replace(/\.md$/i, '')
+}
+
+function baseOf(rel) {
+  const segs = rel.split('/')
+  return stemOf(segs[segs.length - 1] ?? rel)
+}
+
+function linkHits(target, stems, bases) {
+  const raw = String(target ?? '').replace(/\\/g, '/').replace(/\.md$/i, '').trim()
+  if (raw === '') return true
+  const lower = raw.toLowerCase()
+  if (stems.has(lower)) return true
+  const base = (lower.split('/').pop() ?? lower)
+  return bases.has(base)
+}
+
+async function readTitle(fs, target) {
+  try {
+    const text = await fs.readText(target)
+    if (typeof text !== 'string' || text.length > NOTE_READ_CAP) return null
+    return parseNote(text).title
+  } catch {
+    return null
+  }
+}
+
+function coerceMtime(raw) {
+  if (typeof raw === 'number' && Number.isFinite(raw)) return raw
+  if (raw instanceof Date) return raw.getTime()
+  if (typeof raw === 'string' && raw !== '') {
+    const asNum = Number(raw)
+    if (Number.isFinite(asNum) && asNum > 1e11) return asNum
+    const parsed = Date.parse(raw)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return null
+}
+
+/** Best-effort file mtime: fs.stat extras, then host.mtimeMs(abs). */
+export async function readMtimeMs(fs, host, note) {
+  try {
+    const info = await fs.stat(note.target)
+    const fromStat = coerceMtime(info?.mtimeMs ?? info?.mtime)
+    if (fromStat !== null) return fromStat
+  } catch { /* fall through */ }
+  if (typeof host?.mtimeMs === 'function') {
+    try {
+      const abs = typeof fs.processPath === 'function' ? fs.processPath(note.target) : note.target?.targetKey
+      const fromHost = coerceMtime(await host.mtimeMs(abs))
+      if (fromHost !== null) return fromHost
+    } catch { /* ignore */ }
+  }
+  return 0
+}
+
+/**
+ * One payload for the Obsidian center-column surface: today's daily (if any),
+ * recently touched notes, recent journalled changes, and a broken-wikilink
+ * sample. Read-only; never writes.
+ */
+export async function surfaceOverview(fs, vault, {
+  excludes = [],
+  recentLimit = 8,
+  changeLimit = 8,
+  brokenLimit = 8,
+  fileLimit = WALK_FILE_LIMIT,
+  host,
+  dailyFolder,
+  dailyFormat,
+} = {}) {
+  const { notes, truncated } = await walkVaultNotes(fs, vault, { excludes, fileLimit })
+  const rels = notes.map((n) => n.rel)
+  const byRel = new Map(notes.map((n) => [n.rel, n]))
+
+  const stems = new Set()
+  const bases = new Set()
+  for (const rel of rels) {
+    stems.add(stemOf(rel).toLowerCase())
+    bases.add(baseOf(rel).toLowerCase())
+  }
+
+  const daily = await loadDailyHabit(fs, vault, { dailyFolder, dailyFormat })
+  const todayPath = pickDailyPath(rels, daily.todayRel)
+  const today = todayPath === null ? null : {
+    path: todayPath,
+    title: await readTitle(fs, byRel.get(todayPath)?.target),
+  }
+
+  const journal = await listJournal(fs, vault, { limit: 80 })
+  const done = journal.filter((e) => e.status === 'done' && typeof e.path === 'string' && e.path !== '')
+  const lastJournal = new Map()
+  for (const e of done) {
+    if (!lastJournal.has(e.path)) lastJournal.set(e.path, e.ts)
+  }
+
+  const ranked = []
+  for (const note of notes) {
+    let mtime = await readMtimeMs(fs, host, note)
+    const journalTs = lastJournal.get(note.rel)
+    if (typeof journalTs === 'number' && journalTs > mtime) mtime = journalTs
+    ranked.push({ note, mtime })
+  }
+  ranked.sort((a, b) => b.mtime - a.mtime || a.note.rel.localeCompare(b.note.rel))
+
+  const recent = []
+  for (const row of ranked.slice(0, recentLimit)) {
+    recent.push({
+      path: row.note.rel,
+      title: await readTitle(fs, row.note.target),
+    })
+  }
+
+  const changes = done.slice(0, changeLimit).map((e) => ({
+    opId: e.opId,
+    ts: e.ts,
+    path: e.path,
+    kind: e.kind,
+    status: e.status,
+  }))
+
+  const broken = []
+  let brokenCount = 0
+  for (const note of notes) {
+    let text
+    try { text = await fs.readText(note.target) } catch { continue }
+    if (typeof text !== 'string' || text.length > NOTE_READ_CAP) continue
+    const links = parseNote(text).wikilinks
+    for (const target of links) {
+      if (linkHits(target, stems, bases)) continue
+      brokenCount += 1
+      if (broken.length < brokenLimit) broken.push({ from: note.rel, target })
+    }
+  }
+
+  return {
+    vault: vault.vaultAbs,
+    noteCount: notes.length,
+    truncated,
+    todayDate: daily.stamp,
+    todayRel: daily.todayRel,
+    daily,
+    today,
+    recent,
+    changes,
+    brokenCount,
+    broken,
+  }
+}

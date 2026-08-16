@@ -72,6 +72,10 @@ export function hostOf() {
       const { rm } = await import('node:fs/promises')
       await rm(dir, { recursive: true, force: true })
     },
+    mtimeMs: async (abs) => {
+      const { stat } = await import('node:fs/promises')
+      return (await stat(abs)).mtimeMs
+    },
   }
 }
 

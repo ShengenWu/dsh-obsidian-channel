@@ -1,89 +1,85 @@
 # dsh-obsidian-channel
 
-DeepSeek Harness (DSH) 插件：把 Obsidian vault 变成 agent 可安全写入的知识库。
+English · [中文](docs/README.zh.md)
 
-M1：安全内核 + 写侧 + 回滚 —— 所有写操作有审批门、有变更日志
-（journal）、可字节级回滚；冲突时永不静默覆盖。
+[![version](https://img.shields.io/badge/version-0.1.0-0f766e?style=flat-square)](https://github.com/ShengenWu/dsh-obsidian-channel/releases)
+[![dsh](https://img.shields.io/badge/dsh-0.1.0--rc.6-7c3aed?style=flat-square)](https://github.com/deepseek-ai/deepseek-harness)
+[![license](https://img.shields.io/badge/license-MIT-2563eb?style=flat-square)](LICENSE)
+[![node](https://img.shields.io/badge/node-%3E%3D20-339933?style=flat-square)](https://nodejs.org)
+[![topic](https://img.shields.io/badge/topic-dsh--plugin-111827?style=flat-square)](https://github.com/topics/dsh-plugin)
 
-M2：设置页 + 变更历史面板 —— Web 设置页（Settings → Obsidian）里配置 vault
-与审批策略（写后即时生效，落盘重启不丢），变更历史面板逐笔看 before→after
-diff、一键回滚（回滚本身也留痕，可再撤）。
+Work with a local Obsidian vault from [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
 
-## 能力（M1）
+The 📓 button in the sidebar opens a home page for that vault. From there you can send the agent off to read a note, write today’s daily, or chase a broken wikilink. Writes ask you first. Anything this plugin changes can be rolled back. Obsidian itself does not need to be running.
 
-| 工具 | 作用 |
-|---|---|
-| obsidian_read | 读笔记：frontmatter/首 H1/标签/双链/正文 + version 令牌（供守卫更新） |
-| obsidian_note_create | 新建笔记（目标已存在则冲突；支持 frontmatter） |
-| obsidian_note_update | 整体替换或外科式 frontmatter 编辑（未提及的字节原样保留）；带 baseVersion 守卫 |
-| obsidian_note_append | 末尾追加 / 按 section 锚点插入 |
-| obsidian_note_delete | 删除=移入 .dsh-obsidian/trash（永不 unlink） |
-| obsidian_batch | 顺序批量变更；dry-run 投影完整计划 |
-| obsidian_history | 变更日志（opId/路径/动作/时间/会话） |
-| obsidian_undo / obsidian_rollback / obsidian_restore | 字节级回滚与恢复（回滚本身也留痕，可再撤） |
+## What you need
 
-## 安全模型（五层）
+- **dsh web** installed and working
+- Built against **dsh `0.1.0-rc.6`**
+- A normal Obsidian vault folder on disk
 
-- L0 范围边界：路径 sanitize（拒绝 ../、绝对路径、隐藏、坏字符）、vault 外
-  拒绝、符号链接拒绝、排除目录（.obsidian/.git/.dsh-obsidian/.trash + 可配）
-- L1 永不静默覆盖：update 必须带 version 令牌（或最近一次 stat），文件
-  变了 → conflict 报告，不写；删除永远走 trash
-- L2 写入审批：走官方 ctx.approval 接缝（fail-closed）。
-  策略 writePolicy：per-write（默认）/ per-turn / auto
-- L3 journal：每次写操作前落 planned 条目（含 before 全文快照），成功后
-  转 done；保留 30 天可配
-- L4 回滚：undo/rollback 恢复 before 字节级快照；并发改动冲突时拒绝
-  （绝不覆盖他人修改）；restore 从 trash 恢复
+## Install
 
-## 安装
+```bash
+dsh plugin --profile web add github:ShengenWu/dsh-obsidian-channel
+```
 
-    dsh plugin --profile web add github:ShengenWu/dsh-obsidian-channel
-    # 或本地路径（开发时）
+Restart `dsh web` and open http://127.0.0.1:3080.
 
-仓库：https://github.com/ShengenWu/dsh-obsidian-channel
+For a local checkout: `dsh plugin --profile web add /path/to/this/repo`.
 
-然后重启 dsh web。
+## First run
 
-**M2 图形设置**：打开 Settings → Obsidian 页，直接配置 Vault 根目录、
-写入审批策略、排除目录、journal 保留天数（写后即时生效；完整配置表单
-同时出现在 Settings → Plugins → dsh-obsidian-channel）。同一页面下方即
-「变更历史」面板：按时间倒序列出每笔变更，点击展开 before→after diff，
-一键回滚。
+1. Click 📓 **Obsidian** in the left sidebar.
+2. If no vault is bound yet, paste the **absolute path** (`/Users/you/Notes` or `D:\Notes`) and bind it.
+3. You get a home page: today’s daily, recently touched notes, changes this plugin made, broken links.
+4. Click a note or a shortcut like “write today’s daily”. dsh opens a **new** session on that vault and drops text into the composer. It does not send for you.
 
-无图形界面时也可用 cordis 配置：
+The path is remembered. Later clicks only open the home page; they do not create another workspace.
 
-    - id: dsh-obsidian-channel
-      config:
-        vaultDir: /path/to/your/vault
-        writePolicy: per-write   # per-write | per-turn | auto
-        excludes: []
-        journalRetentionDays: 30
+![Vault home](docs/homepage.png)
 
-## 开发与测试
+## Day to day
 
-    npm install                        # 安装 devDeps（tsdown + rc.6 运行时包，均来自 npm）
-    node --test tests/engine.test.mjs  # 21 个安全内核单测（内存 fs，无依赖）
-    node tests/smoke.mjs               # 真实 rc.6 dsh-tools/schemastery 全链路冒烟
-                                       # （含 M2 settings/RPC 接线断言）
-    npm run build                      # 构建 client 半（tsdown → lib/client.js）
+**Talk from the home page.** Click a note, a broken link, or type at the bottom. Each click starts a fresh vault session so you are not dumped into last week’s thread.
 
-client 半是官方 bundle client 通道（package.json 的 dsh.client +
-exports["./client"]，产物 lib/client.js，运行时经 window.__ModuleLoader__
-加载）；host 半纯 JS 零构建。
+**Daily notes follow Obsidian.** The home page and the agent read `.obsidian/daily-notes.json` first. If your vault uses `Daily` + `MM-DD-YYYY`, this plugin uses that path and will not invent another date order. Override it under Settings → Obsidian if you really want to.
 
-## 与 dsh-obsidian-export 的关系
+**Writes wait for you.** Default is ask-every-time. You can switch to “ask once per task” or “never ask” (please don’t).
 
-上游插件提供读侧六件套 + 会话导出（本插件 peerDependency 声明，未来阶段
-接管注册避免重复）。本插件 M1 只做写侧与回滚；obsidian_read 额外返回
-version 令牌，是守卫写操作的前提。
+**Undo lives in Settings.** Settings → Obsidian has the change history: before / after, one-click rollback. A rollback is itself a journaled change, so you can undo the undo.
 
-## 路线图
+**Settings you actually care about:**
 
-- M1 ✅ 安全内核 + 写侧 + 回滚
-- M2 ✅ 设置页 + 变更历史面板（Settings → Obsidian；diff + 一键回滚）
-- M3 daily/模板/图侧（断链/孤儿/MOC）
-- M4 composer 双链补全 + 知识工作流 skills
+- vault path
+- whether writes need approval
+- daily-note folder and date format (optional; empty means “use Obsidian’s own setting”)
+- extra directories the agent must not touch
+- how long to keep the journal (30 days by default)
 
-## 许可
+![Settings](docs/setting.png)
 
-MIT
+Vault sessions default to **Obsidian mode**: it does not change the mode on other workspaces. The persona is “help you tend a knowledge base”, not “write code”.
+
+Reads can stay on the built-in read / grep / glob tools. Creates, replacements, appends, and deletes should go through the `obsidian_*` tools so they land in the journal. Native write / edit into this vault is blocked.
+
+## What’s in 0.1.0
+
+- [x] Sidebar entry and vault home (today / recent / changes / broken links / shortcuts)
+- [x] Approved create, update, append, delete, and batch edits
+- [x] Change journal and one-click rollback
+- [x] Settings page (bind the vault, approval policy, daily habit)
+- [x] Daily-note path taken from Obsidian’s own config
+- [x] Obsidian mode as the default for vault sessions; vault guidance only when the session is actually in the vault
+- [x] Native write / edit into the vault is rejected
+- [ ] Daily / template / graph tools — cards from templates, weekly recap, orphan notes. The home page already lists broken links; there is no dedicated tool yet
+- [ ] A cross-session skill — say “file today’s work in my daily note” from a coding session and have it hit the right vault with the journaled write path
+- [ ] `[[` completion in the composer — pick notes by title while typing a wikilink
+
+Known gap: `bash` can still rewrite files and skip the journal. Be careful in a vault session.
+
+## License
+
+[MIT](LICENSE)
+
+Issues welcome: <https://github.com/ShengenWu/dsh-obsidian-channel/issues>

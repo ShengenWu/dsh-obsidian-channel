@@ -18,11 +18,21 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { NS, type ObsidianKey } from './locales.ts'
 
+interface DailyHabit {
+  folder: string
+  format: string
+  source: string
+  todayRel: string
+}
+
 interface ObsidianConfig {
   vaultDir?: string
   writePolicy?: 'per-write' | 'per-turn' | 'auto'
   excludes?: string[]
   journalRetentionDays?: number
+  dailyFolder?: string
+  dailyFormat?: string
+  daily?: DailyHabit | null
 }
 
 interface Entry {
@@ -273,6 +283,31 @@ export function ObsidianSettingsSection({ t, close, rpc }: SectionProps) {
                 onChange={(ev) => setField('excludes', ev.target.value.split('\n').map((s) => s.trim()).filter((s) => s !== ''))}
               />
               <span className="obs-hint">{t('config.excludesHint')}</span>
+            </div>
+
+            <div className="obs-field">
+              <span className="obs-label">{t('config.dailyFolder')}</span>
+              <input
+                className="obs-input"
+                value={snapshotValue?.dailyFolder ?? ''}
+                placeholder="Daily"
+                onChange={(ev) => setField('dailyFolder', ev.target.value)}
+              />
+              <span className="obs-hint">{t('config.dailyFolderHint')}</span>
+            </div>
+
+            <div className="obs-field">
+              <span className="obs-label">{t('config.dailyFormat')}</span>
+              <input
+                className="obs-input"
+                value={snapshotValue?.dailyFormat ?? ''}
+                placeholder="MM-DD-YYYY"
+                onChange={(ev) => setField('dailyFormat', ev.target.value)}
+              />
+              <span className="obs-hint">{t('config.dailyFormatHint')}</span>
+              {snapshotValue?.daily != null && (
+                <span className="obs-hint">{t('config.dailyResolved', { path: snapshotValue.daily.todayRel, source: snapshotValue.daily.source })}</span>
+              )}
             </div>
 
             <div className="obs-field">

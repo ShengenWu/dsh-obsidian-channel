@@ -1,7 +1,7 @@
 {
   "name": "dsh-obsidian-channel",
   "version": "0.1.0",
-  "description": "DeepSeek Harness (DSH) plugin: native Obsidian vault channel — write-side tools (create/update/append/delete/batch) with approval gate, change journal, and byte-level rollback (undo/rollback/restore).",
+  "description": "Let a DSH agent read and write your local Obsidian vault, with approval and one-click rollback.",
   "type": "module",
   "main": "src/index.js",
   "exports": {
@@ -17,10 +17,15 @@
   "files": [
     "src/",
     "lib/",
-    "cordis.patch.yml"
+    "presets/",
+    "cordis.patch.yml",
+    "LICENSE",
+    "README.md",
+    "docs/"
   ],
   "keywords": [
     "deepseek-harness",
+    "dsh",
     "dsh-plugin",
     "obsidian",
     "vault",
@@ -29,6 +34,18 @@
     "approval"
   ],
   "license": "MIT",
+  "author": "ShengenWu",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ShengenWu/dsh-obsidian-channel.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ShengenWu/dsh-obsidian-channel/issues"
+  },
+  "homepage": "https://github.com/ShengenWu/dsh-obsidian-channel#readme",
+  "engines": {
+    "node": ">=20"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
@@ -47,21 +64,17 @@
     "@deepseek-ai/dsh-tools": ">=0.1.0-rc.6 <1",
     "@deepseek-ai/dsh-fs": ">=0.1.0-rc.6 <1",
     "@deepseek-ai/dsh-user-approval": ">=0.1.0-rc.6 <1",
-    "@deepseek-ai/schemastery": "*",
-    "@deepseek-ai/cordis": "*",
-    "dsh-obsidian-export": "*",
+    "@deepseek-ai/schemastery": ">=3.18.0 <5",
+    "@deepseek-ai/cordis": ">=4.0.0 <5",
     "@deepseek-ai/dsh-settings": ">=0.1.0-rc.6 <1",
     "@deepseek-ai/dsh-client-connection": ">=0.1.0-rc.6 <1",
     "@deepseek-ai/dsh-sandbox": ">=0.1.0-rc.6 <1"
   },
-  "peerDependenciesMeta": {
-    "dsh-obsidian-export": {
-      "optional": true
-    }
-  },
   "scripts": {
-    "test": "node --test tests/engine.test.mjs",
-    "build": "tsdown --config ./tsdown.config.mjs"
+    "test": "node --test tests/engine.test.mjs tests/prompt.test.mjs tests/preset-sync.test.mjs",
+    "test:smoke": "node tests/smoke.mjs",
+    "build": "tsdown --config ./tsdown.config.mjs",
+    "prepare": "npm run build"
   },
   "devDependencies": {
     "@deepseek-ai/dsh-sandbox": "^0.1.0-rc.6",

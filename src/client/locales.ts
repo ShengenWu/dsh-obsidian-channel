@@ -37,6 +37,47 @@ export type ObsidianKey =
   | 'history.loadFailed'
   | 'history.sessionLabel'
   | 'history.closeDetail'
+  | 'panel.title'
+  | 'panel.close'
+  | 'panel.unbound'
+  | 'panel.bindHeading'
+  | 'panel.bindHint'
+  | 'panel.bind'
+  | 'panel.today'
+  | 'panel.todayMissing'
+  | 'panel.todayMissingHint'
+  | 'panel.dailyHabit'
+  | 'config.dailyFolder'
+  | 'config.dailyFolderHint'
+  | 'config.dailyFormat'
+  | 'config.dailyFormatHint'
+  | 'config.dailyResolved'
+  | 'panel.recent'
+  | 'panel.recentEmpty'
+  | 'panel.noteCount'
+  | 'panel.changes'
+  | 'panel.changeCount'
+  | 'panel.broken'
+  | 'panel.brokenNone'
+  | 'panel.ask'
+  | 'panel.send'
+  | 'panel.composerPlaceholder'
+  | 'panel.prompt.read'
+  | 'panel.prompt.todayMissing'
+  | 'panel.prompt.broken'
+  | 'dash.kicker'
+  | 'dash.stat.notes'
+  | 'dash.stat.changes'
+  | 'dash.stat.broken'
+  | 'dash.stat.todayOn'
+  | 'dash.stat.todayOff'
+  | 'dash.actions'
+  | 'dash.action.daily'
+  | 'dash.action.weekly'
+  | 'dash.action.broken'
+  | 'panel.prompt.dailyWork'
+  | 'panel.prompt.weekly'
+  | 'panel.prompt.brokenSweep'
 
 export const NS = 'dsh-obsidian-channel'
 
@@ -79,6 +120,47 @@ export const zh: Record<ObsidianKey, string> = {
   'history.loadFailed': '加载失败：{error}',
   'history.sessionLabel': '会话',
   'history.closeDetail': '关闭详情',
+  'panel.title': '库首页',
+  'panel.close': '回到对话',
+  'panel.unbound': '还没有绑定 vault',
+  'panel.bindHeading': '绑定你的库',
+  'panel.bindHint': '填本地 Obsidian vault 的绝对路径。绑定后点侧边栏就会打开这个面，不会新建工作区。',
+  'panel.bind': '绑定',
+  'panel.today': '今日',
+  'panel.todayMissing': '还没有今日笔记',
+  'panel.todayMissingHint': '让 agent 按库里已有的日记习惯创建',
+  'panel.dailyHabit': '日记：{folder} · {format}',
+  'config.dailyFolder': '每日笔记目录（可选覆盖）',
+  'config.dailyFolderHint': '留空则读取 .obsidian/daily-notes.json 的 folder。',
+  'config.dailyFormat': '每日笔记日期格式（可选覆盖）',
+  'config.dailyFormatHint': 'Moment 记号，例如 MM-DD-YYYY。留空则读取 Obsidian 设置。',
+  'config.dailyResolved': '当前生效：{path}（来源 {source}）',
+  'panel.recent': '最近',
+  'panel.recentEmpty': '库里还没有笔记',
+  'panel.noteCount': '共 {n} 篇',
+  'panel.changes': '本库变更',
+  'panel.changeCount': '{n} 条',
+  'panel.broken': '断链',
+  'panel.brokenNone': '没有发现断链',
+  'panel.ask': '问 agent',
+  'panel.send': '发送',
+  'panel.composerPlaceholder': '问问 agent 关于这个库…',
+  'panel.prompt.read': '请阅读笔记 {path}，简要说明这篇在讲什么，然后等我的下一步。',
+  'panel.prompt.todayMissing': '今天是 {date}。请创建或打开今日日记，路径必须是 {path}。',
+  'panel.prompt.broken': '笔记 {from} 里有断链 [[{target}]]。请确认目标是否改名或移动，并给出修复建议。',
+  'dash.kicker': 'Obsidian',
+  'dash.stat.notes': '{n} 篇笔记',
+  'dash.stat.changes': '{n} 条变更',
+  'dash.stat.broken': '{n} 条断链',
+  'dash.stat.todayOn': '今日已有',
+  'dash.stat.todayOff': '今日未建',
+  'dash.actions': '快捷操作',
+  'dash.action.daily': '写今日日记',
+  'dash.action.weekly': '本周周报',
+  'dash.action.broken': '修断链',
+  'panel.prompt.dailyWork': '今天是 {date}。请把今天的工作内容摘要写入今日日记 {path}（没有就按这个路径创建）。写完告诉我路径。',
+  'panel.prompt.weekly': '请读取最近 7 天的日记，按这个库已有的周报习惯生成本周周报并写入 vault。先给提纲，确认后再落盘。',
+  'panel.prompt.brokenSweep': '请扫描本库断链，先给出报告（来源笔记、目标、是否像改名/移动），不要直接改。等我确认后再修。',
 }
 
 export const en: Record<ObsidianKey, string> = {
@@ -120,4 +202,45 @@ export const en: Record<ObsidianKey, string> = {
   'history.loadFailed': 'Load failed: {error}',
   'history.sessionLabel': 'Session',
   'history.closeDetail': 'Close detail',
+  'panel.title': 'Vault home',
+  'panel.close': 'Back to chat',
+  'panel.unbound': 'No vault bound yet',
+  'panel.bindHeading': 'Bind your vault',
+  'panel.bindHint': 'Absolute path to the local Obsidian vault. The sidebar button opens this surface — it does not create a workspace.',
+  'panel.bind': 'Bind',
+  'panel.today': 'Today',
+  'panel.todayMissing': 'No daily note for today',
+  'panel.todayMissingHint': 'Ask the agent to create one using this vault’s daily habit',
+  'panel.dailyHabit': 'Daily: {folder} · {format}',
+  'config.dailyFolder': 'Daily-note folder (optional override)',
+  'config.dailyFolderHint': 'Leave empty to read folder from .obsidian/daily-notes.json.',
+  'config.dailyFormat': 'Daily-note date format (optional override)',
+  'config.dailyFormatHint': 'Moment tokens, e.g. MM-DD-YYYY. Leave empty to read Obsidian settings.',
+  'config.dailyResolved': 'Resolved: {path} (from {source})',
+  'panel.recent': 'Recent',
+  'panel.recentEmpty': 'No notes in the vault yet',
+  'panel.noteCount': '{n} notes',
+  'panel.changes': 'Vault changes',
+  'panel.changeCount': '{n}',
+  'panel.broken': 'Broken links',
+  'panel.brokenNone': 'No broken links found',
+  'panel.ask': 'Ask',
+  'panel.send': 'Send',
+  'panel.composerPlaceholder': 'Ask the agent about this vault…',
+  'panel.prompt.read': 'Read the note at {path}, summarize it, then wait.',
+  'panel.prompt.todayMissing': 'Today is {date}. Create or open the daily note at exactly {path}.',
+  'panel.prompt.broken': 'Note {from} has a broken wikilink [[{target}]]. Check whether the target was renamed or moved, and suggest a fix.',
+  'dash.kicker': 'Obsidian',
+  'dash.stat.notes': '{n} notes',
+  'dash.stat.changes': '{n} changes',
+  'dash.stat.broken': '{n} broken',
+  'dash.stat.todayOn': 'Daily exists',
+  'dash.stat.todayOff': 'No daily yet',
+  'dash.actions': 'Quick actions',
+  'dash.action.daily': 'Write today',
+  'dash.action.weekly': 'Weekly review',
+  'dash.action.broken': 'Fix links',
+  'panel.prompt.dailyWork': 'Today is {date}. Write today’s work summary into the daily note at {path} (create that exact path if missing). Tell me the path when done.',
+  'panel.prompt.weekly': 'Read the last 7 daily notes and draft this week’s review in the vault’s existing weekly style. Outline first; write only after I confirm.',
+  'panel.prompt.brokenSweep': 'Scan this vault for broken wikilinks. Report sources and likely renames/moves first. Do not edit until I confirm.',
 }
