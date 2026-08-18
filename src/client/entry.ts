@@ -12,6 +12,7 @@
  * workspace.
  */
 import type { PanelController } from './controller.ts'
+import { watchUntilFound } from './dom-mount.ts'
 import { seatStyles } from './styles.ts'
 
 /** Stable data attribute identifying the injected entry row. */
@@ -87,39 +88,34 @@ export function mountObsidianEntry(controller: PanelController): () => void {
 
   const entry = createEntry(() => { controller.toggle() })
   let root: HTMLElement | undefined
-  let placed = false
   let rootObserver: MutationObserver | undefined
+  let stopWait: (() => void) | undefined
 
-  const tryPlace = (): void => {
-    if (root !== undefined && !root.isConnected) {
-      rootObserver?.disconnect()
-      root = undefined
-      placed = false
-    }
-    if (placed) {
-      if (document.body.contains(entry)) return
-      rootObserver?.disconnect()
-      root = undefined
-      placed = false
-    }
-    root ??= sidebarRoot()
-    if (root === undefined) return
-    placed = placeEntry(root, entry)
-    if (placed && rootObserver === undefined) {
-      rootObserver = new MutationObserver(() => {
-        if (root === undefined || !root.isConnected) {
-          placed = false
-          tryPlace()
-          return
-        }
-        if (!root.contains(entry)) placed = placeEntry(root, entry)
-      })
-      rootObserver.observe(root, { childList: true, subtree: true })
-    }
+  const watchRoot = (host: HTMLElement) => {
+    rootObserver?.disconnect()
+    root = host
+    placeEntry(host, entry)
+    rootObserver = new MutationObserver(() => {
+      if (root === undefined || !root.isConnected) {
+        rootObserver?.disconnect()
+        rootObserver = undefined
+        root = undefined
+        stopWait?.()
+        stopWait = watchUntilFound(sidebarRoot, watchRoot)
+        return
+      }
+      if (entry.parentElement !== root) {
+        queueMicrotask(() => {
+          if (root !== undefined && root.isConnected && entry.parentElement !== root) placeEntry(root, entry)
+        })
+      }
+    })
+    // childList only: the session list lives under this root; subtree would
+    // fire on every session-row render and stall the whole sidebar.
+    rootObserver.observe(host, { childList: true })
   }
 
-  const waitObserver = new MutationObserver(() => { tryPlace() })
-  waitObserver.observe(document.body, { childList: true, subtree: true })
+  stopWait = watchUntilFound(sidebarRoot, watchRoot)
 
   const syncActive = () => {
     if (controller.getSnapshot().panelOpen) entry.dataset.active = 'true'
@@ -128,10 +124,8 @@ export function mountObsidianEntry(controller: PanelController): () => void {
   const unsubscribe = controller.subscribe(syncActive)
   syncActive()
 
-  tryPlace()
-
   return () => {
-    waitObserver.disconnect()
+    stopWait?.()
     rootObserver?.disconnect()
     unsubscribe()
     entry.remove()

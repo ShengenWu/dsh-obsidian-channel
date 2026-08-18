@@ -2,7 +2,7 @@
 
 English · [中文](docs/README.zh.md)
 
-[![version](https://img.shields.io/badge/version-0.1.0-0f766e?style=flat-square)](https://github.com/ShengenWu/dsh-obsidian-channel/releases)
+[![version](https://img.shields.io/badge/version-0.1.1--rc.1-0f766e?style=flat-square)](https://github.com/ShengenWu/dsh-obsidian-channel/releases)
 [![dsh](https://img.shields.io/badge/dsh-0.1.0--rc.6-7c3aed?style=flat-square)](https://github.com/deepseek-ai/deepseek-harness)
 [![license](https://img.shields.io/badge/license-MIT-2563eb?style=flat-square)](LICENSE)
 [![node](https://img.shields.io/badge/node-%3E%3D20-339933?style=flat-square)](https://nodejs.org)
@@ -32,7 +32,7 @@ For a local checkout: `dsh plugin --profile web add /path/to/this/repo`.
 
 1. Click 📓 **Obsidian** in the left sidebar.
 2. If no vault is bound yet, paste the **absolute path** (`/Users/you/Notes` or `D:\Notes`) and bind it.
-3. You get a home page: today’s daily, recently touched notes, changes this plugin made, broken links.
+3. You get a home page. Default widgets are **Continue** (recent notes) and **Vault changes** (journal + rollback). Turn on Today / Search / Structure / Inbox / Links in Settings → Obsidian.
 4. Click a note or a shortcut like “write today’s daily”. dsh opens a **new** session on that vault and drops text into the composer. It does not send for you.
 
 The path is remembered. Later clicks only open the home page; they do not create another workspace.
@@ -63,6 +63,19 @@ Vault sessions default to **Obsidian mode**: it does not change the mode on othe
 
 Reads can stay on the built-in read / grep / glob tools. Creates, replacements, appends, and deletes should go through the `obsidian_*` tools so they land in the journal. Native write / edit into this vault is blocked.
 
+## What’s new in 0.1.1-rc.1
+
+Pre-release after `0.1.0`. Pin it with `dsh plugin --profile web add github:ShengenWu/dsh-obsidian-channel#v0.1.1-rc.1`.
+
+- Native folder pickers for the vault and the daily-note folder
+- Home tiles in three sizes (S / M / L), drag to arrange, size in the ⋯ menu
+- Click a note to edit it in a full overlay (source + preview)
+- Today’s note is the note: click to open or create, **Agent** jumps to the vault workspace
+- Recent-note titles use H1, then YAML `title`, then the filename
+- Opening Obsidian no longer stays selected together with SSH / the task board
+
+Still not in this cut: templates, weekly recap, `[[` completion.
+
 ## What’s in 0.1.0
 
 - [x] Sidebar entry and vault home (today / recent / changes / broken links / shortcuts)
@@ -72,8 +85,12 @@ Reads can stay on the built-in read / grep / glob tools. Creates, replacements, 
 - [x] Daily-note path taken from Obsidian’s own config
 - [x] Obsidian mode as the default for vault sessions; vault guidance only when the session is actually in the vault
 - [x] Native write / edit into the vault is rejected
-- [ ] Daily / template / graph tools — cards from templates, weekly recap, orphan notes. The home page already lists broken links; there is no dedicated tool yet
-- [ ] A cross-session skill — say “file today’s work in my daily note” from a coding session and have it hit the right vault with the journaled write path
+- [x] Composable homepage (shell + toggled widgets; default is continue + changes)
+- [x] Search, list, structure, backlinks, and journaled move (rewrites `[[wikilinks]]`)
+- [x] Literal `oldString` / `newString` update
+- [x] Detect local vaults from Obsidian’s app config
+- [x] Runtime skill `obsidian-vault` (available outside vault sessions)
+- [ ] Daily / template cards and weekly recap
 - [ ] `[[` completion in the composer — pick notes by title while typing a wikilink
 
 Known gap: `bash` can still rewrite files and skip the journal. Be careful in a vault session.

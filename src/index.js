@@ -2,9 +2,14 @@ import z from '@deepseek-ai/schemastery'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { ESCALATION_TARGETS, approveEscalation, escalationHintMarker, sandboxDenialMarker, validateEscalationArgs } from '@deepseek-ai/dsh-sandbox'
 import { registerObsidianChannelTools, hostOf } from './tools.js'
-import { openVault, listJournal, journalEntry, rollbackEntry, surfaceOverview, loadDailyHabit } from './engine.js'
+import { openVault, listJournal, journalEntry, rollbackEntry, surfaceOverview, loadDailyHabit, previewNote, searchNotes, mutateNote } from './engine.js'
 import { installVaultPrompt, shouldDefaultObsidianPreset } from './prompt.js'
 import { OBSIDIAN_PRESET_ID, syncObsidianPreset } from './preset-sync.js'
+import { HOME_WIDGETS, mergeHomeWidgets, enabledWidgetIds, resolveWidgetIds } from './home-catalog.js'
+import { mergeHomeLayout } from './home-layout.js'
+import { detectObsidianVaults } from './detect.js'
+import { pickFolder, relativeInside } from './pick-folder.js'
+import { installObsidianSkill } from './skill.js'
 
 export const name = 'dsh-obsidian-channel'
 export const inject = ['tools', 'fs', 'approval']
@@ -13,15 +18,28 @@ export const Config = z.object({
   vaultDir: z.string().default('')
     .description('Obsidian vault 根目录（绝对路径）。留空时每次工具调用都需显式传 vaultDir。'),
   writePolicy: z.union(['per-write', 'per-turn', 'auto']).default('per-write')
-    .description('写入审批策略：per-write 每次写都审批（默认，最安全）；per-turn 每个任务内同工具免重复审批；auto 不审批（显式开启，不建议）。'),
+    .description('写入审批策略：per-write 每次都询问；per-turn 每个会话只询问一次；auto 不询问始终放行。'),
   excludes: z.array(z.string()).default([])
     .description('额外禁止访问的目录名（总是叠加内置名单：.obsidian / .git / .dsh-obsidian / .trash）。'),
   journalRetentionDays: z.number().default(30)
     .description('journal 保留天数（超期的条目在写入时被清理）。'),
   dailyFolder: z.string().default('')
-    .description('每日笔记目录（相对 vault）。留空则读取 .obsidian/daily-notes.json，再不行用 Daily。'),
+    .description('每日笔记目录（相对 vault）。留空则读取 .obsidian/daily-notes.json；两者都没有则不发明日记路径。'),
   dailyFormat: z.string().default('')
-    .description('每日笔记文件名日期格式（Moment 记号，如 MM-DD-YYYY）。留空则读取 Obsidian 设置，再不行用 YYYY-MM-DD。'),
+    .description('每日笔记文件名日期格式（Moment 记号，如 MM-DD-YYYY）。留空则读取 Obsidian 设置；两者都没有则不发明日记路径。'),
+  homeWidgets: z.array(z.object({
+    id: z.string(),
+    enabled: z.boolean(),
+  })).default(HOME_WIDGETS)
+    .description('首页组件开关。壳（顶栏 / 绑定 / 底栏）不可关；其余按 id 开关。'),
+  homeLayout: z.array(z.object({
+    id: z.string(),
+    x: z.number().default(0),
+    y: z.number().default(0),
+    size: z.union(['s', 'm', 'l']).default('m'),
+    cols: z.number().default(2),
+  })).default([])
+    .description('首页小组件：位置 + 小/中/大。'),
 })
 
 const NS = settingsNamespace('dsh-obsidian-channel')
@@ -53,6 +71,8 @@ function configView(cfg) {
     journalRetentionDays: cfg.journalRetentionDays ?? 30,
     dailyFolder: cfg.dailyFolder ?? '',
     dailyFormat: cfg.dailyFormat ?? '',
+    homeWidgets: mergeHomeWidgets(cfg.homeWidgets),
+    homeLayout: mergeHomeLayout(cfg.homeLayout),
   }
 }
 
@@ -125,15 +145,14 @@ export function apply(ctx, config) {
     if (agent === undefined) return 'unavailable'
     if (policy === 'per-turn') {
       const sessionId = typeof agent.session?.id === 'string' ? agent.session.id : ''
-      const key = sessionId + '|' + (exec.rootCallId ?? exec.callId ?? '') + '|' + toolName
-      if (turnGrants.has(key)) return 'allowed-once'
+      if (sessionId !== '' && turnGrants.has(sessionId)) return 'allowed-once'
       const outcome = await ctx.approval.request({
         agent, toolName, callId: exec.callId,
         reason: 'Obsidian vault write: ' + toolName + ' on ' + (plan.path ?? '(unknown path)')
           + ' (' + (plan.kind ?? 'mutation') + ', ' + (plan.size ?? 0) + ' bytes after change)',
         signal: exec.signal,
       })
-      if (outcome === 'allowed-once') turnGrants.set(key, true)
+      if (outcome === 'allowed-once' && sessionId !== '') turnGrants.set(sessionId, true)
       return outcome
     }
     return ctx.approval.request({
@@ -216,6 +235,7 @@ export function apply(ctx, config) {
 
   registerObsidianChannelTools(ctx, currentConfig, makeApprover, sandbox)
   installVaultPrompt(ctx, currentConfig, () => lastDaily)
+  installObsidianSkill(ctx)
   void refreshDaily()
 
   try {
@@ -249,14 +269,50 @@ export function apply(ctx, config) {
         // none yet) and are served before any vault is opened.
         if (endpoint === 'config/get') {
           const view = configView(cfg)
-          view.daily = await refreshDaily()
+          try {
+            view.daily = await refreshDaily()
+          } catch {
+            view.daily = null
+          }
           return { ok: true, value: view }
+        }
+        if (endpoint === 'vault/detect') {
+          const vaults = await detectObsidianVaults()
+          return { ok: true, value: { vaults } }
+        }
+        if (endpoint === 'vault/pick') {
+          const kind = p?.kind === 'daily' ? 'daily' : 'vault'
+          if (kind === 'daily') {
+            const vaultDir = String(cfg.vaultDir ?? '').trim()
+            if (vaultDir === '') {
+              return { ok: false, error: { code: 'vault-required', message: 'vault required', details: {} } }
+            }
+            const picked = await pickFolder({ startDir: vaultDir, prompt: '选择日记所在文件夹' })
+            if (picked.cancelled === true || !picked.path) {
+              return { ok: true, value: { cancelled: true } }
+            }
+            const rel = relativeInside(vaultDir, picked.path)
+            if (rel === null) {
+              return { ok: false, error: { code: 'outside-vault', message: 'outside vault', details: {} } }
+            }
+            return { ok: true, value: { path: rel } }
+          }
+          const picked = await pickFolder({ prompt: '选择 Obsidian 库' })
+          if (picked.cancelled === true || !picked.path) {
+            return { ok: true, value: { cancelled: true } }
+          }
+          return { ok: true, value: { path: picked.path } }
         }
         if (endpoint === 'config/set') {
           const field = typeof p?.field === 'string' ? p.field : ''
           if (field === '') return rpcError('config/set requires a field')
           if (settingsScope === null) return rpcError('settings service is not available')
-          await settingsScope.update({ [field]: p?.value })
+          const nextValue = field === 'homeWidgets'
+            ? mergeHomeWidgets(p?.value)
+            : field === 'homeLayout'
+              ? mergeHomeLayout(p?.value)
+              : p?.value
+          await settingsScope.update({ [field]: nextValue })
           const view = configView(currentConfig())
           view.daily = await refreshDaily()
           return { ok: true, value: view }
@@ -301,14 +357,57 @@ export function apply(ctx, config) {
             return { ok: true, value: { vault: vault.vaultAbs, topLevel } }
           }
           case 'surface/overview': {
+            const widgets = resolveWidgetIds(
+              Array.isArray(p?.widgets) ? p.widgets : enabledWidgetIds(cfg.homeWidgets),
+            )
             const overview = await surfaceOverview(ctx.fs, vault, {
               excludes: cfg.excludes ?? [],
               host,
               dailyFolder: cfg.dailyFolder,
               dailyFormat: cfg.dailyFormat,
+              widgets,
             })
-            lastDaily = overview.daily ?? lastDaily
+            if (overview.daily !== undefined) lastDaily = overview.daily
+            else await refreshDaily()
             return { ok: true, value: overview }
+          }
+          case 'surface/preview': {
+            const path = typeof p?.path === 'string' ? p.path : ''
+            if (path === '') return rpcError('surface/preview requires a path')
+            const preview = await previewNote(ctx.fs, vault, path, cfg.excludes ?? [], {
+              allowMissing: p?.allowMissing === true,
+            })
+            return { ok: true, value: preview }
+          }
+          case 'surface/save': {
+            const path = typeof p?.path === 'string' ? p.path : ''
+            if (path === '') return rpcError('surface/save requires a path')
+            const content = typeof p?.content === 'string' ? p.content : null
+            if (content === null) return rpcError('surface/save requires content')
+            const existing = await previewNote(ctx.fs, vault, path, cfg.excludes ?? [], { allowMissing: true })
+            const saved = await mutateNote(ctx.fs, host, vault, {
+              rel: path,
+              kind: existing.missing === true ? 'create' : 'update',
+              content,
+              frontmatter: null,
+              tool: 'obsidian_surface_save',
+              sessionId: null,
+              journalRetentionDays: cfg.journalRetentionDays,
+              excludes: cfg.excludes ?? [],
+              onApprove: async () => 'allowed-once',
+              baseVersion: p?.version,
+            })
+            if (saved.ok !== true) return rpcError(saved.message ?? 'save failed')
+            const preview = await previewNote(ctx.fs, vault, path, cfg.excludes ?? [])
+            return { ok: true, value: { ...preview, opId: saved.opId ?? null } }
+          }
+          case 'surface/search': {
+            const query = typeof p?.query === 'string' ? p.query : ''
+            const tag = typeof p?.tag === 'string' ? p.tag : undefined
+            const matches = await searchNotes(ctx.fs, vault, {
+              query, tag, limit: p?.limit, excludes: cfg.excludes ?? [],
+            })
+            return { ok: true, value: { matches } }
           }
           default:
             return rpcError('unknown /obsidian endpoint: ' + endpoint)

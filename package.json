@@ -1,6 +1,6 @@
 {
   "name": "dsh-obsidian-channel",
-  "version": "0.1.0",
+  "version": "0.1.1-rc.1",
   "description": "Let a DSH agent read and write your local Obsidian vault, with approval and one-click rollback.",
   "type": "module",
   "main": "src/index.js",
@@ -21,6 +21,7 @@
     "cordis.patch.yml",
     "LICENSE",
     "README.md",
+    "SKILL.md",
     "docs/"
   ],
   "keywords": [
@@ -71,7 +72,7 @@
     "@deepseek-ai/dsh-sandbox": ">=0.1.0-rc.6 <1"
   },
   "scripts": {
-    "test": "node --test tests/engine.test.mjs tests/prompt.test.mjs tests/preset-sync.test.mjs",
+    "test": "node --test tests/engine.test.mjs tests/prompt.test.mjs tests/preset-sync.test.mjs tests/pick-folder.test.mjs tests/markdown.test.mjs tests/home-layout.test.mjs",
     "test:smoke": "node tests/smoke.mjs",
     "build": "tsdown --config ./tsdown.config.mjs",
     "prepare": "npm run build"

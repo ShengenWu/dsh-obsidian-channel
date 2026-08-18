@@ -11,6 +11,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import {
   openVault, resolveNotePath, parseNote, sha256, SafeError,
   mutateNote, deleteNote, batchMutate, listJournal, rollbackEntry, restoreFromTrash,
+  searchNotes, listNotes, collectGraph, structureFromGraph, backlinksFor, moveNote,
 } from './engine.js'
 
 const READ_SIZE_LIMIT = 5 * 1024 * 1024
@@ -232,6 +233,9 @@ export function registerObsidianChannelTools(ctx, getConfig, makeApprover, sandb
             frontmatter: args.frontmatter,
             frontmatterUpdates: args.frontmatterUpdates,
             frontmatterDeletes: args.frontmatterDeletes,
+            oldString: args.oldString,
+            newString: args.newString,
+            replaceAll: args.replaceAll,
             section: args.section,
             baseVersion: args.baseVersion,
             dryRun: args.dryRun === true,
@@ -270,17 +274,20 @@ export function registerObsidianChannelTools(ctx, getConfig, makeApprover, sandb
   })
 
   registerWrite('obsidian_note_update', 'update', [
-    'Update an existing note. Either replace the whole content (content +',
-    'optional frontmatter) or perform a surgical frontmatter edit via',
-    'frontmatterUpdates / frontmatterDeletes — every byte you do not mention',
-    'is preserved exactly.',
+    'Update an existing note. Prefer literal oldString/newString replacement',
+    'for a surgical edit. Alternatively replace the whole content (content +',
+    'optional frontmatter) or merge frontmatter via frontmatterUpdates /',
+    'frontmatterDeletes — every byte you do not mention is preserved exactly.',
     'Pass baseVersion (from obsidian_read) to be rejected if the file changed',
     'since you read it; never overwrites silently.',
   ].join(' '), {
-    content: { type: 'string', description: 'Full replacement body (markdown). Omit to do a frontmatter-only edit.' },
+    content: { type: 'string', description: 'Full replacement body (markdown). Omit to do a frontmatter-only or literal edit.' },
     frontmatter: { type: 'object', additionalProperties: true, description: 'Replacement frontmatter, used only together with content.' },
     frontmatterUpdates: { type: 'object', additionalProperties: true, description: 'Key to new value map; null removes the key. Byte-preserving merge.' },
     frontmatterDeletes: { type: 'array', items: { type: 'string' }, description: 'Frontmatter keys to delete.' },
+    oldString: { type: 'string', description: 'Literal text that must appear in the note; replaced by newString. Must match exactly once unless replaceAll is true.' },
+    newString: { type: 'string', description: 'Replacement text for oldString.' },
+    replaceAll: { type: 'boolean', description: 'Replace every occurrence of oldString. Defaults to false.' },
     baseVersion: { type: 'string', description: 'Version token from a previous obsidian_read; guards against overwriting concurrent edits.' },
   })
 
@@ -348,7 +355,7 @@ export function registerObsidianChannelTools(ctx, getConfig, makeApprover, sandb
     name: 'obsidian_batch',
     description: [
       'Run several vault mutations in order: each op is an object with an',
-      'action field ("create", "update", "append" or "delete") plus the',
+      'action field ("create", "update", "append", "delete" or "move") plus the',
       'parameters of the corresponding single tool.',
       'Each op journals independently and can be rolled back individually.',
       'With dryRun=true nothing is written and you get the full plan preview.',
@@ -394,6 +401,208 @@ export function registerObsidianChannelTools(ctx, getConfig, makeApprover, sandb
       }
     },
     presentCall: (args) => ({ card: 'generic', title: 'Batch vault mutation', kind: 'other', rawInput: { ops: args.ops?.length } }),
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'obsidian_search',
+    description: [
+      'Search the Obsidian vault by title or body substring, optionally filtered',
+      'by tag. Returns path, title, tags, and a snippet. Prefer this over raw',
+      'grep when looking for notes by topic.',
+    ].join(' '),
+    parameters: {
+      vaultDir: { type: 'string', description: 'Obsidian vault root directory. Omit to use the plugin-configured default.' },
+      query: { type: 'string', description: 'Case-insensitive substring to match against title and body. Omit to search by tag only.' },
+      tag: { type: 'string', description: 'Optional tag filter (without #).' },
+      dir: { type: 'string', description: 'Optional subdirectory to limit the search to.' },
+      limit: { type: 'number', description: 'Maximum matches (default 50).' },
+    },
+    output: {
+      schema: {
+        type: 'object', additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          action: { type: 'string', required: true },
+          code: { type: 'string' },
+          matches: { type: 'array', items: { type: 'object', additionalProperties: true } },
+          message: { type: 'string' },
+        },
+      },
+      render: (_args, value) => textBlock('obsidian_search -> ' + ((value.matches ?? []).length) + ' match(es)'),
+    },
+    async execute(args) {
+      try {
+        const vault = await vaultOf(ctx, getConfig, args)
+        const matches = await searchNotes(ctx.fs, vault, {
+          query: args.query, tag: args.tag, dir: args.dir, limit: args.limit, excludes: getConfig().excludes,
+        })
+        return cleanNulls({ ok: true, action: 'search', matches })
+      } catch (err) {
+        return errTurn(err instanceof SafeError ? err.message : String(err?.message ?? err))
+      }
+    },
+    presentCall: (args) => ({ card: 'generic', title: 'Search vault', kind: 'search', rawInput: { query: args.query, tag: args.tag } }),
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'obsidian_list',
+    description: 'List notes in the vault, optionally under a subdirectory. Returns path + title (from the filename).',
+    parameters: {
+      vaultDir: { type: 'string', description: 'Obsidian vault root directory. Omit to use the plugin-configured default.' },
+      dir: { type: 'string', description: 'Optional subdirectory relative to the vault root.' },
+      limit: { type: 'number', description: 'Maximum notes to return (default 200).' },
+    },
+    output: {
+      schema: {
+        type: 'object', additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          action: { type: 'string', required: true },
+          code: { type: 'string' },
+          notes: { type: 'array', items: { type: 'object', additionalProperties: true } },
+          message: { type: 'string' },
+        },
+      },
+      render: (_args, value) => textBlock('obsidian_list -> ' + ((value.notes ?? []).length) + ' note(s)'),
+    },
+    async execute(args) {
+      try {
+        const vault = await vaultOf(ctx, getConfig, args)
+        const notes = await listNotes(ctx.fs, vault, { dir: args.dir, limit: args.limit, excludes: getConfig().excludes })
+        return cleanNulls({ ok: true, action: 'list', notes })
+      } catch (err) {
+        return errTurn(err instanceof SafeError ? err.message : String(err?.message ?? err))
+      }
+    },
+    presentCall: (args) => ({ card: 'generic', title: 'List notes', kind: 'search', rawInput: { dir: args.dir } }),
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'obsidian_structure',
+    description: 'Summarize the vault: top-level folders, tag counts, and orphan notes (no incoming and no outgoing wikilinks).',
+    parameters: {
+      vaultDir: { type: 'string', description: 'Obsidian vault root directory. Omit to use the plugin-configured default.' },
+    },
+    output: {
+      schema: {
+        type: 'object', additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          action: { type: 'string', required: true },
+          code: { type: 'string' },
+          folders: { type: 'array', items: { type: 'object', additionalProperties: true } },
+          tags: { type: 'array', items: { type: 'object', additionalProperties: true } },
+          orphans: { type: 'array', items: { type: 'string' } },
+          orphanCount: { type: 'number' },
+          noteCount: { type: 'number' },
+          truncated: { type: 'boolean' },
+          message: { type: 'string' },
+        },
+      },
+      render: (_args, value) => textBlock('obsidian_structure -> ' + (value.noteCount ?? 0) + ' notes, ' + ((value.orphans ?? []).length) + ' orphan(s)'),
+    },
+    async execute(args) {
+      try {
+        const vault = await vaultOf(ctx, getConfig, args)
+        const graph = await collectGraph(ctx.fs, vault, { excludes: getConfig().excludes })
+        return cleanNulls({ ok: true, action: 'structure', ...structureFromGraph(graph) })
+      } catch (err) {
+        return errTurn(err instanceof SafeError ? err.message : String(err?.message ?? err))
+      }
+    },
+    presentCall: () => ({ card: 'generic', title: 'Vault structure', kind: 'search' }),
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'obsidian_backlinks',
+    description: 'Find notes that link to the given note via [[wikilinks]]. Path is vault-relative.',
+    parameters: {
+      vaultDir: { type: 'string', description: 'Obsidian vault root directory. Omit to use the plugin-configured default.' },
+      path: { type: 'string', description: 'Note path relative to the vault root.' },
+    },
+    output: {
+      schema: {
+        type: 'object', additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          action: { type: 'string', required: true },
+          code: { type: 'string' },
+          backlinks: { type: 'array', items: { type: 'object', additionalProperties: true } },
+          message: { type: 'string' },
+        },
+      },
+      render: (_args, value) => textBlock('obsidian_backlinks -> ' + ((value.backlinks ?? []).length) + ' note(s)'),
+    },
+    async execute(args) {
+      try {
+        const vault = await vaultOf(ctx, getConfig, args)
+        const backlinks = await backlinksFor(ctx.fs, vault, args.path, { excludes: getConfig().excludes })
+        return cleanNulls({ ok: true, action: 'backlinks', backlinks })
+      } catch (err) {
+        return errTurn(err instanceof SafeError ? err.message : String(err?.message ?? err))
+      }
+    },
+    presentCall: (args) => ({ card: 'generic', title: 'Backlinks', kind: 'search', rawInput: { path: args.path } }),
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'obsidian_move',
+    description: [
+      'Move or rename a note. Rewrites [[wikilinks]] that pointed at the old',
+      'name/path. Journaled; can be undone with obsidian_undo / obsidian_rollback.',
+    ].join(' '),
+    parameters: {
+      vaultDir: { type: 'string', description: 'Obsidian vault root directory. Omit to use the plugin-configured default.' },
+      from: { type: 'string', description: 'Current path relative to the vault root.' },
+      to: { type: 'string', description: 'Destination path relative to the vault root.' },
+      dryRun: { type: 'boolean', description: 'Preview the move and link rewrites without writing.' },
+      ...sandbox.schemaFields(),
+    },
+    output: {
+      schema: {
+        type: 'object', additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          action: { type: 'string', required: true },
+          code: { type: 'string' },
+          path: { type: 'string' },
+          from: { type: 'string' },
+          to: { type: 'string' },
+          opId: { type: 'string' },
+          updatedLinks: { type: 'number' },
+          beforeHash: { type: 'string' },
+          afterHash: { type: 'string' },
+          plan: { type: 'object', additionalProperties: true },
+          outcome: { type: 'string' },
+          message: { type: 'string' },
+        },
+      },
+      render: (_args, value) => textBlock('obsidian_move -> ' + (value.from ?? '') + ' -> ' + (value.to ?? value.path ?? '') + (value.message ? '\n' + value.message : '')),
+    },
+    async execute(args, exec) {
+      const { policy, policyError } = await resolveSandboxPolicy('obsidian_move', args, exec)
+      if (policyError !== undefined) return errTurn(policyError)
+      try {
+        const vault = await vaultOf(ctx, getConfig, args)
+        const res = await moveNote(ctx.fs, host, vault, {
+          from: args.from,
+          to: args.to,
+          dryRun: args.dryRun === true,
+          sessionId: sessionIdOf(exec),
+          excludes: getConfig().excludes,
+          journalRetentionDays: getConfig().journalRetentionDays,
+          argsSanitized: jsonSafe(args),
+          sandboxPolicy: policy,
+          onApprove: (plan) => makeApprover(ctx, exec, 'obsidian_move', plan),
+        })
+        return sizeOutcome(res)
+      } catch (err) {
+        const hint = sandboxErrorOf(err, policy)
+        if (hint !== null) return errTurn(hint, 'SANDBOX_DENIED')
+        return errTurn(err instanceof SafeError ? err.message : String(err?.message ?? err))
+      }
+    },
+    presentCall: (args) => ({ card: 'generic', title: 'Move note', kind: 'other', rawInput: { from: args.from, to: args.to } }),
   }))
 
   // ---- rollback tools ----

@@ -2,7 +2,7 @@
 
 [English](../README.md) · 中文
 
-[![version](https://img.shields.io/badge/version-0.1.0-0f766e?style=flat-square)](https://github.com/ShengenWu/dsh-obsidian-channel/releases)
+[![version](https://img.shields.io/badge/version-0.1.1--rc.1-0f766e?style=flat-square)](https://github.com/ShengenWu/dsh-obsidian-channel/releases)
 [![dsh](https://img.shields.io/badge/dsh-0.1.0--rc.6-7c3aed?style=flat-square)](https://github.com/deepseek-ai/deepseek-harness)
 [![license](https://img.shields.io/badge/license-MIT-2563eb?style=flat-square)](../LICENSE)
 [![node](https://img.shields.io/badge/node-%3E%3D20-339933?style=flat-square)](https://nodejs.org)
@@ -33,7 +33,7 @@ dsh plugin --profile web add github:ShengenWu/dsh-obsidian-channel
 
 1. 点左侧 📓 **Obsidian**。
 2. 如果还没绑过库，填 vault 的**绝对路径**（macOS / Linux 类似 `/Users/you/Notes`，Windows 类似 `D:\Notes`），点绑定。
-3. 你会看到库首页：今日日记、最近改过的笔记、本插件留下的变更、断链。
+3. 你会看到库首页。默认两块是 **继续**（最近笔记）和 **本库变更**（journal + 回滚）。今日 / 搜索 / 结构 / 待整理 / 断链 在设置 → Obsidian 里按需打开。
 4. 点一条笔记或点「写今日日记」之类的快捷操作。dsh 会在这个 vault 上开一个**新会话**，把草稿放进输入框。你改完再自己发送，插件不会偷偷帮你发出去。
 
 绑定过一次就会记住。之后点 📓 只是打开首页，不会再新建一个工作区。
@@ -65,6 +65,19 @@ vault 会话默认会走 **Obsidian 模式**：不干涉其他工作空间的模
 读笔记用 dsh 自带的 read / grep / glob 就行。真正改笔记（新建、整篇替换、追加、删除）请让它走 `obsidian_*` 工具，这样才进变更记录、才能撤回。插件会拦住对着这个 vault 的原生 write / edit。
 
 
+## 0.1.1-rc.1 新加了什么
+
+`0.1.0` 之后的预发布。指定这版：`dsh plugin --profile web add github:ShengenWu/dsh-obsidian-channel#v0.1.1-rc.1`。
+
+- 知识库和日记文件夹用系统选择器
+- 首页卡片三种尺寸（小 / 中 / 大），可拖拽，大小在右上角 ⋯ 里改
+- 点笔记会弹出整页编辑（左边源码，右边预览）
+- 「今日日记」就是今天这篇：点开可写，没有就新建；右上角 **Agent** 跳到这个库的 Workspace
+- 最近笔记标题按一级标题 → YAML title → 文件名
+- 点 Obsidian 不会和 SSH / 看板同时亮着
+
+这版还没有：模板建卡、周报、输入框 `[[` 补全。
+
 ## 0.1.0 里有什么
 
 - [x] 侧边栏入口和库首页（今日 / 最近 / 变更 / 断链 / 快捷操作）
@@ -74,8 +87,12 @@ vault 会话默认会走 **Obsidian 模式**：不干涉其他工作空间的模
 - [x] 日记路径跟 Obsidian 设置对齐
 - [x] vault 会话默认 Obsidian 模式；只有在这个库里才会加 vault 说明
 - [x] 原生 write / edit 进 vault 会被拒绝
-- [ ] 日记 / 模板 / 图谱工具 — 按模板建卡、出周报、扫孤儿笔记；首页已经能看断链，还没有专用工具
-- [ ] 跨会话 skill — 写代码的会话里说一句「把今天的活写进日记」，也知道该改哪个库、用哪套写工具
+- [x] 可开关的库首页（壳 + 组件；默认是「继续」和「本库变更」）
+- [x] 搜索、列表、结构、反链、带链接改写的 journaled 移动
+- [x] 字面量 `oldString` / `newString` 更新
+- [x] 从本机 Obsidian 配置探测 vault
+- [x] 运行时 skill `obsidian-vault`（写代码的会话也能调）
+- [ ] 按模板建卡、出周报
 - [ ] 输入框 `[[` 补全 — 打双链时按笔记标题补全
 
 已知限制：agent 如果用 `bash` 直接改文件，还绕得过我们的写守卫，这种改动不会进变更记录。vault 会话里尤其要注意。

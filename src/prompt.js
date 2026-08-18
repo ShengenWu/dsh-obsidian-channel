@@ -4,7 +4,7 @@
  * keep the stock harness prompt).
  */
 
-import { dailyRelPath, formatDailyName } from './engine.js'
+import { hasDailyHabit } from './engine.js'
 
 export function sameAbsPath(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string' || a === '' || b === '') return false
@@ -35,38 +35,40 @@ export function shouldDefaultObsidianPreset(agent, vaultDir, currentPreset, pres
 export function vaultGuidance(vaultDir, daily) {
   const vault = String(vaultDir ?? '').trim()
   if (vault === '') return ''
-  const format = daily?.format || 'YYYY-MM-DD'
-  const folder = daily?.folder ?? 'Daily'
-  const stamp = formatDailyName(Date.now(), format)
-  const todayRel = dailyRelPath(folder, stamp)
-  const source = daily?.source === 'override'
-    ? 'plugin settings override'
-    : daily?.source === 'obsidian'
-      ? '.obsidian/daily-notes.json'
-      : 'plugin default'
-  return [
+  const lines = [
     'This session is bound to the Obsidian vault at:',
     vault,
     '',
-    'Reads (non-invasive): use the native read / grep / glob tools. Do not prefer obsidian_read unless you need its version token for a later guarded update.',
+    'Reads (non-invasive): prefer obsidian_search / obsidian_list / obsidian_structure / obsidian_backlinks to find notes. Use obsidian_read when you need the version token for a later guarded update. Native read / grep / glob are fine for one-off inspection.',
     '',
-    'Writes (invasive — create / replace / append / delete notes) MUST use the vault tools so every change is journaled and can be rolled back:',
+    'Writes (invasive — create / replace / append / delete / move notes) MUST use the vault tools so every change is journaled and can be rolled back:',
     '- obsidian_note_create',
-    '- obsidian_note_update (pass baseVersion from a prior obsidian_read)',
+    '- obsidian_note_update (prefer oldString/newString; pass baseVersion from a prior obsidian_read)',
     '- obsidian_note_append',
     '- obsidian_note_delete',
+    '- obsidian_move (rewrites [[wikilinks]])',
     '- obsidian_batch',
     'Never use native write, edit, or bash redirection to change notes in this vault.',
     '',
     'History / undo: obsidian_history, obsidian_undo, obsidian_rollback, obsidian_restore.',
     'vaultDir may be omitted; the plugin default is this vault.',
-    '',
-    'Daily notes (must match exactly — do not swap day and month):',
-    '- folder: ' + (folder === '' ? '(vault root)' : folder),
-    '- filename format: ' + format + ' (from ' + source + ')',
-    "- today's note path: " + todayRel,
-    'Create a missing daily note at that exact path with obsidian_note_create.',
-  ].join('\n')
+  ]
+  if (hasDailyHabit(daily)) {
+    const source = daily.source === 'override'
+      ? 'plugin settings override'
+      : daily.source === 'obsidian'
+        ? '.obsidian/daily-notes.json'
+        : daily.source
+    lines.push(
+      '',
+      'Daily notes (must match exactly — do not swap day and month):',
+      '- folder: ' + (daily.folder === '' ? '(vault root)' : daily.folder),
+      '- filename format: ' + daily.format + ' (from ' + source + ')',
+      "- today's note path: " + daily.todayRel,
+      'Create a missing daily note at that exact path with obsidian_note_create.',
+    )
+  }
+  return lines.join('\n')
 }
 
 export function guidanceForAssembly(context, vaultDir, daily) {

@@ -6,8 +6,9 @@
  *     settingsScope：DSH host-apiproxy 的 settings.describe 白名单不暴露第三方
  *     namespace，待 DSH 支持第三方 namespace 暴露后应改回 settingsScope。
  *   - mounts a sidebar entry that toggles a center-column Obsidian surface
- *     (today / recent / changes / broken links / composer). Clicking does not
- *     create a workspace.
+ *     (chrome + toggled home widgets). Built-in widgets live in the local
+ *     catalog; the reserved slot name for later injectors is
+ *     `obsidian.home.widget`. Clicking the sidebar does not create a workspace.
  *   - registers the 'dsh-obsidian-channel' locale dictionaries.
  *
  * Discovered by dsh-client-modules via package.json dsh.client +
@@ -20,6 +21,7 @@ import { mountObsidianEntry } from './entry.ts'
 import { NS, zh, en, type ObsidianKey } from './locales.ts'
 import { ObsidianSettingsSection } from './ObsidianSection.tsx'
 import { mountObsidianPanel } from './panel-mount.tsx'
+import { createObsidianRpc } from './rpc.ts'
 import { handoffToAgent } from './talk.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -36,8 +38,7 @@ export function apply(ctx: ClientContext): void {
   const t = ctx.locale.bind(NS)
 
   const controller = new PanelController()
-  const rpc = (endpoint: string, payload?: unknown) =>
-    ctx.connection.rpc.call('/obsidian', endpoint, payload ?? null)
+  const rpc = createObsidianRpc(ctx.connection)
 
   ctx.effect(() => {
     const disposers: Array<() => void> = []
@@ -62,7 +63,9 @@ export function apply(ctx: ClientContext): void {
       name: 'settings.section',
       id: 'dsh-obsidian-channel',
       order: 100,
-      label: () => t('nav.label'),
+      label: () => {
+        try { return t('nav.label') } catch { return 'Obsidian' }
+      },
       locale: NS,
       inject: () => ({ rpc }),
     },

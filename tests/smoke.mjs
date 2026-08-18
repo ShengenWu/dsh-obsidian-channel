@@ -73,6 +73,9 @@ const ctx = {
     describe: () => [],
     get: () => undefined,
   },
+  skills: {
+    register: (skill) => { registered['__skill:' + skill.name] = skill },
+  },
   // connection RPC registry (fake): captures the /obsidian channel handler
   connection: {
     rpc: {
@@ -303,20 +306,48 @@ if (denied.ok !== false) throw new Error('traversal not blocked')
   if (check.ok !== true || check.value.vault !== '/vault') throw new Error('vault/check failed: ' + JSON.stringify(check))
   console.log('rpc vault/check:', JSON.stringify(check.value))
 
+  if (!Array.isArray(cfgGet.value.homeWidgets)) throw new Error('config/get missing homeWidgets: ' + JSON.stringify(cfgGet))
+  const defaultOn = cfgGet.value.homeWidgets.filter((w) => w.enabled).map((w) => w.id)
+  if (defaultOn.join(',') !== 'continue,changes') throw new Error('default home widgets should be continue+changes: ' + JSON.stringify(defaultOn))
+
   const overview = await rpc('surface/overview', {}, undefined)
   if (overview.ok !== true || overview.value.vault !== '/vault') throw new Error('surface/overview failed: ' + JSON.stringify(overview))
-  if (!Array.isArray(overview.value.recent) || !Array.isArray(overview.value.changes) || !Array.isArray(overview.value.broken)) {
+  if (!Array.isArray(overview.value.recent) || !Array.isArray(overview.value.changes)) {
     throw new Error('surface/overview shape wrong: ' + JSON.stringify(overview.value))
   }
-  if (typeof overview.value.todayDate !== 'string' || typeof overview.value.noteCount !== 'number') {
-    throw new Error('surface/overview missing todayDate/noteCount: ' + JSON.stringify(overview.value))
+  if (overview.value.broken !== undefined || overview.value.today !== undefined) {
+    throw new Error('default overview must omit daily/links: ' + JSON.stringify(overview.value))
+  }
+  if (typeof overview.value.noteCount !== 'number') {
+    throw new Error('surface/overview missing noteCount: ' + JSON.stringify(overview.value))
   }
   console.log('rpc surface/overview:', JSON.stringify({
     noteCount: overview.value.noteCount,
-    today: overview.value.today?.path ?? null,
+    widgets: overview.value.widgets,
     changes: overview.value.changes.length,
-    broken: overview.value.brokenCount,
   }))
+
+  const preview = await rpc('surface/preview', { path: 'Notes/demo.md' }, undefined)
+  if (preview.ok !== true || preview.value.path !== 'Notes/demo.md') throw new Error('surface/preview failed: ' + JSON.stringify(preview))
+  console.log('rpc surface/preview:', JSON.stringify({ path: preview.value.path, title: preview.value.title }))
+
+  const detect = await rpc('vault/detect', {}, undefined)
+  if (detect.ok !== true || !Array.isArray(detect.value.vaults)) throw new Error('vault/detect failed: ' + JSON.stringify(detect))
+  console.log('rpc vault/detect:', detect.value.vaults.length, 'vault(s)')
+
+  const searched = await rpc('surface/search', { query: 'plain' }, undefined)
+  if (searched.ok !== true || !Array.isArray(searched.value.matches)) throw new Error('surface/search failed: ' + JSON.stringify(searched))
+  console.log('rpc surface/search:', searched.value.matches.length, 'hit(s)')
+
+  if (registered['obsidian_search'] === undefined) throw new Error('obsidian_search not registered')
+  if (registered['obsidian_move'] === undefined) throw new Error('obsidian_move not registered')
+  if (registered['obsidian_backlinks'] === undefined) throw new Error('obsidian_backlinks not registered')
+  if (registered['__skill:obsidian-vault'] === undefined) throw new Error('runtime skill not registered')
+  const lit = await registered['obsidian_note_update'].execute({
+    vaultDir: '/vault', path: 'Plain/plain.md', oldString: 'just text, no title', newString: 'just text, edited',
+  }, exec)
+  if (lit.ok !== true || lit.action !== 'update') throw new Error('literal update failed: ' + JSON.stringify(lit))
+  console.log('literal update:', lit.action, lit.opId)
 
   const bad = await rpc('nope', {}, undefined)
   if (bad.ok !== false || bad.error.code !== 'internal') throw new Error('unknown endpoint must fail with internal: ' + JSON.stringify(bad))

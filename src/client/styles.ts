@@ -16,14 +16,14 @@ const CSS = [
   '[data-dsh-frame][data-sidebar-collapsed] [data-dsh-obsidian-entry] .entryLabel{display:none}',
 
   // --- center-column takeover ----------------------------------------------
-  '[data-pane="conversation"],[class*="centerCol"]{position:relative}',
+  '[data-dsh-obsidian-host]{position:relative}',
   '[data-dsh-obsidian-view]{position:absolute;inset:0;display:none;z-index:61;background:var(--dsw-alias-bg-base,#111);color:var(--dsw-alias-label-primary,inherit)}',
   'html[data-dsh-obsidian-active] [data-dsh-obsidian-view]{display:block}',
-  'html[data-dsh-obsidian-active] [data-pane="conversation"]>:not([data-dsh-obsidian-view]),html[data-dsh-obsidian-active] [class*="centerCol"]>:not([data-dsh-obsidian-view]){display:none!important}',
+  'html[data-dsh-obsidian-active] [data-dsh-obsidian-host]>:not([data-dsh-obsidian-view]){display:none!important}',
   'html[data-dsh-obsidian-active] [data-dsh-taskboard-view],html[data-dsh-obsidian-active] [data-dsh-ssh-view]{display:none!important}',
 
   // --- dashboard ------------------------------------------------------------
-  '[data-dsh-obsidian-view] .ob-surface{display:flex;flex-direction:column;height:100%;min-height:0;padding:18px 22px 16px;gap:14px;box-sizing:border-box;font-family:var(--dsw-font-family,inherit)}',
+  '[data-dsh-obsidian-view] .ob-surface{position:relative;display:flex;flex-direction:column;height:100%;min-height:0;padding:18px 22px 16px;gap:14px;box-sizing:border-box;font-family:var(--dsw-font-family,inherit)}',
   '[data-dsh-obsidian-view] .ob-kicker{margin:0 0 4px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--dsw-alias-text-accent,#a78bfa);opacity:.9}',
   '[data-dsh-obsidian-view] .ob-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex:none}',
   '[data-dsh-obsidian-view] .ob-title{margin:0;font-size:22px;font-weight:700;letter-spacing:-.02em}',
@@ -41,17 +41,50 @@ const CSS = [
   '[data-dsh-obsidian-view] .ob-quick-label{font-size:12px;opacity:.55;margin-right:4px}',
   '[data-dsh-obsidian-view] .ob-chip{padding:6px 12px;border-radius:999px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,140,.35));background:transparent;color:inherit;cursor:pointer;font:inherit;font-size:13px}',
   '[data-dsh-obsidian-view] .ob-chip:hover{border-color:var(--dsw-alias-text-accent,#a78bfa);color:var(--dsw-alias-text-accent,#a78bfa)}',
-  '[data-dsh-obsidian-view] .ob-body{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);grid-auto-rows:auto;gap:12px;flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;align-content:start}',
-  '[data-dsh-obsidian-view] .ob-card{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border:1px solid var(--dsw-alias-border-l1,rgba(128,128,140,.22));border-radius:12px;background:var(--dsw-alias-bg-layer-2,transparent);min-width:0}',
-  '[data-dsh-obsidian-view] .ob-card.span2{grid-column:1/-1}',
-  '[data-dsh-obsidian-view] .ob-card-h{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:13px;font-weight:600;line-height:1.55;min-width:0}',
+  '[data-dsh-obsidian-view] .ob-body{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;display:flex;flex-direction:column;gap:14px}',
+  '[data-dsh-obsidian-view] .ob-board-wrap{display:flex;flex-direction:column;gap:8px;flex:none}',
+  '[data-dsh-obsidian-view] .ob-board-bar{display:flex;justify-content:flex-end}',
+  '[data-dsh-obsidian-view] .ob-board{position:relative;width:100%}',
+  '[data-dsh-obsidian-view] .ob-tile{position:absolute;min-width:0;min-height:0;overflow:visible;box-sizing:border-box;border-radius:16px;border:1px solid rgba(167,139,250,.38);box-shadow:0 1px 2px rgba(0,0,0,.04),0 2px 6px rgba(0,0,0,.05)}',
+  '[data-dsh-obsidian-view] .ob-tile.dragging,[data-dsh-obsidian-view] .ob-tile.menu-open{z-index:40;user-select:none}',
+  '[data-dsh-obsidian-view] .ob-tile.dragging{box-shadow:0 1px 3px rgba(0,0,0,.05),0 6px 16px rgba(0,0,0,.08)}',
+  '[data-dsh-obsidian-view] .ob-drag{position:absolute;top:0;left:0;right:88px;height:38px;cursor:grab;z-index:2}',
+  '[data-dsh-obsidian-view] .ob-tile.dragging .ob-drag{cursor:grabbing}',
+  '[data-dsh-obsidian-view] .ob-tile-gear{position:absolute;top:8px;right:8px;z-index:3}',
+  '[data-dsh-obsidian-view] .ob-tile-more{display:flex;align-items:center;justify-content:center;width:26px;height:26px;padding:0;border:none;border-radius:8px;background:transparent;color:inherit;opacity:.42;cursor:pointer}',
+  '[data-dsh-obsidian-view] .ob-tile-more:hover,[data-dsh-obsidian-view] .ob-tile-more.on{opacity:1;background:rgba(167,139,250,.14)}',
+  '[data-dsh-obsidian-view] .ob-tile-menu{position:absolute;top:30px;right:0;min-width:92px;padding:4px;border-radius:10px;border:1px solid rgba(167,139,250,.28);background:var(--dsw-alias-bg-base,#fff);box-shadow:0 4px 18px rgba(0,0,0,.1);display:flex;flex-direction:column;gap:1px}',
+  '[data-dsh-obsidian-view] .ob-tile-menu-item{display:block;width:100%;text-align:left;padding:6px 10px;border:none;border-radius:7px;background:transparent;color:inherit;font:inherit;font-size:13px;line-height:1.4;cursor:pointer}',
+  '[data-dsh-obsidian-view] .ob-tile-menu-item:hover{background:rgba(167,139,250,.1)}',
+  '[data-dsh-obsidian-view] .ob-tile-menu-item.on{background:rgba(167,139,250,.16);color:var(--dsw-alias-text-accent,#a78bfa)}',
+  '[data-dsh-obsidian-view] .ob-card{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border:1px solid rgba(0,0,0,.06);border-radius:16px;background:var(--dsw-alias-bg-layer-2,rgba(255,255,255,.92));box-shadow:none;min-width:0;overflow:hidden;isolation:isolate;box-sizing:border-box}',
+  '[data-dsh-obsidian-view] .ob-tile .ob-card{height:100%;max-height:100%;border:none;border-radius:15px}',
+  '[data-dsh-obsidian-view] .ob-tile.dragging .ob-card{outline:none}',
+  '[data-dsh-obsidian-view] .ob-card.span2{width:100%}',
+  '[data-dsh-obsidian-view] .ob-card-h{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:0 36px 8px 0;margin-bottom:2px;border-bottom:1px solid rgba(150,150,165,.28);font-size:13px;font-weight:650;line-height:1.55;min-width:0;flex:none}',
+  '[data-dsh-obsidian-view] .ob-card.has-agent .ob-card-h{padding-right:88px}',
   '[data-dsh-obsidian-view] .ob-card-h>span:first-child{flex:none}',
+  '[data-dsh-obsidian-view] .ob-card-h-right{display:flex;align-items:center;gap:6px;min-width:0}',
+  '[data-dsh-obsidian-view] .ob-tile .ob-card-agent{position:absolute;top:8px;right:38px;z-index:3;padding:4px 8px;border:none;border-radius:8px;background:transparent;color:var(--dsw-alias-text-accent,#a78bfa);font:inherit;font-size:12px;line-height:1.3;cursor:pointer}',
+  '[data-dsh-obsidian-view] .ob-tile .ob-card-agent:hover{background:rgba(167,139,250,.14)}',
+  '[data-dsh-obsidian-view] .ob-tile .ob-card-agent:disabled{opacity:.5;cursor:default}',
+  '[data-dsh-obsidian-view] .ob-daily-hit{display:flex;flex-direction:column;align-items:flex-start;gap:6px;width:100%;margin:0;padding:0;border:none;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;min-width:0;min-height:0;flex:1}',
+  '[data-dsh-obsidian-view] .ob-daily-date{font-size:20px;font-weight:700;letter-spacing:-.03em;line-height:1.2}',
+  '[data-dsh-obsidian-view] .ob-card-body{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;display:flex;flex-direction:column;gap:8px}',
   '[data-dsh-obsidian-view] .ob-count{font-weight:500;opacity:.65;font-size:12px;line-height:1.55;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}',
   '[data-dsh-obsidian-view] .ob-hint{font-size:12px;line-height:1.55;opacity:.55;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+  '[data-dsh-obsidian-view] .ob-hint.wrap{white-space:normal;overflow:visible}',
+  '[data-dsh-obsidian-view] .ob-search{display:flex;gap:8px;align-items:center;flex:none}',
+  '[data-dsh-obsidian-view] .ob-search .ob-input{flex:1}',
   '[data-dsh-obsidian-view] .ob-msg{font-size:12px}',
   '[data-dsh-obsidian-view] .ob-msg.err{color:#ff6b6b}',
   '[data-dsh-obsidian-view] .ob-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px;border-radius:8px;cursor:pointer;border:1px solid transparent;min-width:0}',
   '[data-dsh-obsidian-view] .ob-row:hover{background:rgba(128,128,140,.08);border-color:rgba(128,128,140,.18)}',
+  '[data-dsh-obsidian-view] .ob-row.on{border-color:var(--dsw-alias-text-accent,#a78bfa);background:rgba(167,139,250,.08)}',
+  '[data-dsh-obsidian-view] .ob-row.static{cursor:default}',
+  '[data-dsh-obsidian-view] .ob-preview{display:flex;flex-direction:column;gap:6px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l1,rgba(128,128,140,.22));border-radius:8px;min-width:0}',
+  '[data-dsh-obsidian-view] .ob-preview-h{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px;font-weight:600}',
+  '[data-dsh-obsidian-view] .ob-preview-body{margin:0;white-space:pre-wrap;word-break:break-word;font:inherit;font-size:12px;line-height:1.55;opacity:.88}',
   '[data-dsh-obsidian-view] .ob-row .main{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}',
   '[data-dsh-obsidian-view] .ob-row .path{font-size:13px;line-height:1.55;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}',
   '[data-dsh-obsidian-view] .ob-row .meta{font-size:11px;line-height:1.55;opacity:.55;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}',
@@ -63,7 +96,7 @@ const CSS = [
   '[data-dsh-obsidian-view] .ob-input,[data-dsh-obsidian-view] .ob-area{width:100%;box-sizing:border-box;padding:8px 10px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,140,.35));background:var(--dsw-specific-input-major,transparent);color:inherit;font:inherit;font-size:13px}',
   '[data-dsh-obsidian-view] .ob-composer{display:flex;gap:8px;align-items:flex-end;flex:none;padding-top:4px;border-top:1px solid var(--dsw-alias-border-l1,rgba(128,128,140,.18))}',
   '[data-dsh-obsidian-view] .ob-composer .ob-area{flex:1;min-height:52px;resize:vertical}',
-  '@media (max-width:900px){[data-dsh-obsidian-view] .ob-stats{grid-template-columns:repeat(2,minmax(0,1fr))}[data-dsh-obsidian-view] .ob-body{grid-template-columns:1fr}}',
+  '@media (max-width:900px){[data-dsh-obsidian-view] .ob-stats{grid-template-columns:repeat(2,minmax(0,1fr))}}',
   '[data-dsh-obsidian-view] .ob-diff{display:flex;flex-direction:column;border:1px solid rgba(128,128,140,.22);border-radius:8px;overflow:hidden;max-height:240px}',
   '[data-dsh-obsidian-view] .ob-diff .pane{display:flex;overflow:auto}',
   '[data-dsh-obsidian-view] .ob-diff .col{flex:1;min-width:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;line-height:1.45;white-space:pre-wrap;word-break:break-all;padding:6px 10px}',
@@ -71,14 +104,54 @@ const CSS = [
   '[data-dsh-obsidian-view] .ob-diff .pane-head{padding:6px 10px;font-size:11px;opacity:.65;border-bottom:1px solid rgba(128,128,140,.2)}',
   '[data-dsh-obsidian-view] .ob-diff .del{background:rgba(255,107,107,.12);color:#ff6b6b}',
   '[data-dsh-obsidian-view] .ob-diff .add{background:rgba(81,200,138,.12);color:#51c88a}',
+
+  // --- note editor overlay (portaled to body, like Settings) ---------------
+  '[data-dsh-obsidian-editor].ob-overlay{position:fixed;inset:0;z-index:240;display:flex;align-items:stretch;justify-content:center;color:var(--dsw-alias-label-primary,inherit);font-family:var(--dsw-font-family,inherit)}',
+  '[data-dsh-obsidian-editor] .ob-overlay-back{position:absolute;inset:0;border:none;padding:0;margin:0;background:rgba(0,0,0,.5);cursor:pointer}',
+  '[data-dsh-obsidian-editor] .ob-overlay-sheet{position:relative;z-index:1;display:flex;flex-direction:column;gap:10px;width:min(1120px,92vw);height:min(860px,86vh);margin:auto;padding:16px 18px 14px;box-sizing:border-box;border-radius:14px;border:1px solid var(--dsw-alias-border-l1,rgba(128,128,140,.28));background:var(--dsw-alias-bg-base,#161616);box-shadow:0 24px 80px rgba(0,0,0,.45)}',
+  '[data-dsh-obsidian-editor] .ob-modal-h{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex:none}',
+  '[data-dsh-obsidian-editor] .ob-modal-title{min-width:0}',
+  '[data-dsh-obsidian-editor] .ob-modal-title .name{font-size:16px;font-weight:700;letter-spacing:-.02em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+  '[data-dsh-obsidian-editor] .ob-modal-title .meta{margin-top:3px;font-size:12px;opacity:.55;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+  '[data-dsh-obsidian-editor] .ob-actions{display:flex;gap:8px;flex:none}',
+  '[data-dsh-obsidian-editor] .ob-btn{padding:5px 12px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,rgba(128,128,140,.4));background:transparent;color:inherit;cursor:pointer;font:inherit;font-size:13px}',
+  '[data-dsh-obsidian-editor] .ob-btn:disabled{opacity:.5;cursor:default}',
+  '[data-dsh-obsidian-editor] .ob-btn.primary{border-color:var(--dsw-alias-text-accent,#a78bfa);color:var(--dsw-alias-text-accent,#a78bfa)}',
+  '[data-dsh-obsidian-editor] .ob-hint{font-size:12px;line-height:1.55;opacity:.55}',
+  '[data-dsh-obsidian-editor] .ob-hint.wrap{white-space:normal}',
+  '[data-dsh-obsidian-editor] .ob-msg.err{font-size:12px;color:#ff6b6b}',
+  '[data-dsh-obsidian-editor] .ob-editor{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px;flex:1;min-height:0}',
+  '[data-dsh-obsidian-editor] .ob-editor-pane{display:flex;flex-direction:column;min-width:0;min-height:0;border:1px solid var(--dsw-alias-border-l1,rgba(128,128,140,.22));border-radius:10px;overflow:hidden}',
+  '[data-dsh-obsidian-editor] .ob-editor-label{flex:none;padding:6px 10px;font-size:11px;letter-spacing:.04em;text-transform:uppercase;opacity:.55;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(128,128,140,.18))}',
+  '[data-dsh-obsidian-editor] .ob-editor-src{flex:1;min-height:0;width:100%;box-sizing:border-box;resize:none;border:none;outline:none;padding:12px;background:transparent;color:inherit;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;line-height:1.55}',
+  '[data-dsh-obsidian-editor] .ob-md{flex:1;min-height:0;overflow:auto;padding:14px 16px 20px;font-size:14px;line-height:1.65}',
+  '[data-dsh-obsidian-editor] .ob-md h1,[data-dsh-obsidian-editor] .ob-md h2,[data-dsh-obsidian-editor] .ob-md h3,[data-dsh-obsidian-editor] .ob-md h4{margin:1.1em 0 .4em;line-height:1.3;letter-spacing:-.02em}',
+  '[data-dsh-obsidian-editor] .ob-md h1{font-size:1.55em}',
+  '[data-dsh-obsidian-editor] .ob-md h2{font-size:1.28em}',
+  '[data-dsh-obsidian-editor] .ob-md h3{font-size:1.1em}',
+  '[data-dsh-obsidian-editor] .ob-md p{margin:.55em 0}',
+  '[data-dsh-obsidian-editor] .ob-md ul,[data-dsh-obsidian-editor] .ob-md ol{margin:.45em 0;padding-left:1.4em}',
+  '[data-dsh-obsidian-editor] .ob-md blockquote{margin:.6em 0;padding:.2em 0 .2em 12px;border-left:3px solid rgba(167,139,250,.45);opacity:.88}',
+  '[data-dsh-obsidian-editor] .ob-md hr{border:none;border-top:1px solid rgba(128,128,140,.28);margin:1em 0}',
+  '[data-dsh-obsidian-editor] .ob-md code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.9em;padding:.1em .35em;border-radius:4px;background:rgba(128,128,140,.14)}',
+  '[data-dsh-obsidian-editor] .ob-md pre{margin:.7em 0;padding:10px 12px;border-radius:8px;overflow:auto;background:rgba(128,128,140,.1)}',
+  '[data-dsh-obsidian-editor] .ob-md pre code{padding:0;background:none}',
+  '[data-dsh-obsidian-editor] .ob-md pre.fm{font-size:12px;opacity:.7}',
+  '[data-dsh-obsidian-editor] .ob-md a{color:var(--dsw-alias-text-accent,#a78bfa)}',
+  '[data-dsh-obsidian-editor] .ob-md .wiki{color:var(--dsw-alias-text-accent,#a78bfa)}',
+  '[data-dsh-obsidian-editor] .ob-md .tag{opacity:.7}',
+  '[data-dsh-obsidian-editor] .ob-md img{max-width:100%;border-radius:6px}',
+  '@media (max-width:900px){[data-dsh-obsidian-editor] .ob-editor{grid-template-columns:1fr}[data-dsh-obsidian-editor] .ob-overlay-sheet{width:96vw;height:92vh}}',
 ].join('\n')
 
-/** Seat the stylesheet once per page. */
+/** Seat the stylesheet; replace text if a previous bundle already injected it. */
 export function seatStyles(): void {
   if (typeof document === 'undefined') return
-  if (document.getElementById(STYLE_ID) !== null) return
-  const style = document.createElement('style')
-  style.id = STYLE_ID
+  let style = document.getElementById(STYLE_ID) as HTMLStyleElement | null
+  if (style === null) {
+    style = document.createElement('style')
+    style.id = STYLE_ID
+    document.head.appendChild(style)
+  }
   style.textContent = CSS
-  document.head.appendChild(style)
 }

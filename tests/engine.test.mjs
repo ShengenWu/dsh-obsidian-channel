@@ -9,8 +9,12 @@ import {
   mutateNote, deleteNote, batchMutate,
   listJournal, latestDoneEntry, rollbackEntry, restoreFromTrash,
   pickDailyPath, walkVaultNotes, surfaceOverview, todayStamp,
-  formatDailyName, dailyRelPath, loadDailyHabit,
+  formatDailyName, dailyRelPath, loadDailyHabit, previewNote, hasDailyHabit,
+  displayTitle, applyLiteralReplace, rewriteWikilinks, searchNotes, listNotes, backlinksFor,
+  collectGraph, structureFromGraph, moveNote,
 } from '../src/engine.js'
+import { mergeHomeWidgets, resolveWidgetIds, enabledWidgetIds } from '../src/home-catalog.js'
+import { parseObsidianVaults, obsidianConfigPaths } from '../src/detect.js'
 
 const NL = '\n'
 
@@ -484,6 +488,7 @@ test('formatDailyName follows Obsidian Moment tokens', () => {
   assert.equal(formatDailyName(noon, 'YYYY-MM-DD'), '2026-08-16')
   assert.equal(formatDailyName(noon, 'MM-DD-YYYY'), '08-16-2026')
   assert.equal(formatDailyName(noon, 'DD-MM-YYYY'), '16-08-2026')
+  assert.equal(formatDailyName(noon, ''), '08-16-2026')
   assert.equal(dailyRelPath('Daily', '08-16-2026'), 'Daily/08-16-2026.md')
 })
 
@@ -503,6 +508,29 @@ test('loadDailyHabit reads .obsidian/daily-notes.json', async () => {
   assert.equal(habit.format, 'MM-DD-YYYY')
   assert.equal(habit.folder, 'Daily')
   assert.equal(habit.todayRel, 'Daily/08-16-2026.md')
+  assert.equal(hasDailyHabit(habit), true)
+})
+
+test('loadDailyHabit does not invent Daily/MM-DD-YYYY when nothing is configured', async () => {
+  const { fs, vault } = await setup()
+  const habit = await loadDailyHabit(fs, vault, {})
+  assert.equal(habit.source, 'none')
+  assert.equal(habit.todayRel, null)
+  assert.equal(hasDailyHabit(habit), false)
+})
+
+test('mergeHomeWidgets keeps catalog order and drops unknown ids', () => {
+  const merged = mergeHomeWidgets([
+    { id: 'links', enabled: true },
+    { id: 'continue', enabled: false },
+    { id: 'from-future', enabled: true },
+  ])
+  assert.deepEqual(merged.find((w) => w.id === 'continue'), { id: 'continue', enabled: false })
+  assert.deepEqual(merged.find((w) => w.id === 'changes'), { id: 'changes', enabled: true })
+  assert.deepEqual(merged.find((w) => w.id === 'links'), { id: 'links', enabled: true })
+  assert.equal(merged.some((w) => w.id === 'from-future'), false)
+  assert.deepEqual(enabledWidgetIds(), ['continue', 'changes'])
+  assert.deepEqual(resolveWidgetIds(['links', 'nope']), ['links'])
 })
 
 test('walkVaultNotes skips hidden/excluded dirs and lists markdown', async () => {
@@ -519,7 +547,7 @@ test('walkVaultNotes skips hidden/excluded dirs and lists markdown', async () =>
   assert.deepEqual(notes.map((n) => n.rel).sort(), ['Notes/a.md'])
 })
 
-test('surfaceOverview reports today, recent, changes, and broken links', async () => {
+test('surfaceOverview default widgets are continue + changes, not daily or links', async () => {
   const { fs, host, vault, allow } = await setup()
   const date = todayStamp()
   await mutateNote(fs, host, vault, opts({
@@ -531,11 +559,33 @@ test('surfaceOverview reports today, recent, changes, and broken links', async (
     tool: 't', onApprove: allow,
   }))
   const overview = await surfaceOverview(fs, vault, { excludes: [] })
-  assert.equal(overview.today?.path, 'Daily/' + date + '.md')
-  assert.equal(overview.today?.title, 'Today')
+  assert.equal(overview.today, undefined)
+  assert.equal(overview.broken, undefined)
+  assert.equal(overview.brokenCount, undefined)
   assert.equal(overview.noteCount, 2)
   assert.ok(overview.recent.some((n) => n.path === 'Hub.md'))
   assert.ok(overview.changes.length >= 2)
+})
+
+test('surfaceOverview computes daily and links only when those widgets are on', async () => {
+  const { fs, host, vault, allow } = await setup()
+  fs.ensureDirs('/vault/.obsidian')
+  fs.files.set('/vault/.obsidian/daily-notes.json', JSON.stringify({ format: 'YYYY-MM-DD', folder: 'Daily' }))
+  const date = formatDailyName(Date.now(), 'YYYY-MM-DD')
+  await mutateNote(fs, host, vault, opts({
+    rel: 'Daily/' + date + '.md', kind: 'create', content: '# Today\nSee [[Missing Note]] and [[Hub]].',
+    tool: 't', onApprove: allow,
+  }))
+  await mutateNote(fs, host, vault, opts({
+    rel: 'Hub.md', kind: 'create', content: '# Hub',
+    tool: 't', onApprove: allow,
+  }))
+  const overview = await surfaceOverview(fs, vault, {
+    excludes: [],
+    widgets: ['continue', 'changes', 'daily', 'links'],
+  })
+  assert.equal(overview.today?.path, 'Daily/' + date + '.md')
+  assert.equal(overview.today?.title, 'Today')
   assert.equal(overview.brokenCount, 1)
   assert.equal(overview.broken[0].target, 'Missing Note')
   assert.equal(overview.broken[0].from, 'Daily/' + date + '.md')
@@ -551,15 +601,136 @@ test('surfaceOverview today follows Obsidian MM-DD-YYYY, not the swapped name', 
     rel: 'Daily/' + swapped + '.md', kind: 'create', content: '# wrong order',
     tool: 't', onApprove: allow,
   }))
-  const missing = await surfaceOverview(fs, vault, { excludes: [] })
+  const missing = await surfaceOverview(fs, vault, { excludes: [], widgets: ['daily'] })
   assert.equal(missing.todayRel, 'Daily/' + stamp + '.md')
   assert.equal(missing.today, null)
   await mutateNote(fs, host, vault, opts({
     rel: 'Daily/' + stamp + '.md', kind: 'create', content: '# correct',
     tool: 't', onApprove: allow,
   }))
-  const found = await surfaceOverview(fs, vault, { excludes: [] })
+  const found = await surfaceOverview(fs, vault, { excludes: [], widgets: ['daily'] })
   assert.equal(found.today?.path, 'Daily/' + stamp + '.md')
+})
+
+test('surfaceOverview changes-only does not walk recent notes', async () => {
+  const { fs, host, vault, allow } = await setup()
+  await mutateNote(fs, host, vault, opts({ rel: 'Hub.md', kind: 'create', content: '# Hub', tool: 't', onApprove: allow }))
+  const overview = await surfaceOverview(fs, vault, { excludes: [], host, widgets: ['changes'] })
+  assert.equal(overview.recent, undefined)
+  assert.equal(overview.noteCount, undefined)
+  assert.ok(overview.changes.length >= 1)
+})
+
+test('applyLiteralReplace is exact-once unless replaceAll', () => {
+  const once = applyLiteralReplace('aa bb aa', 'bb', 'CC')
+  assert.equal(once.nextText, 'aa CC aa')
+  assert.throws(() => applyLiteralReplace('aa aa', 'aa', 'b'), (e) => e.code === 'AMBIGUOUS')
+  const all = applyLiteralReplace('aa aa', 'aa', 'b', true)
+  assert.equal(all.nextText, 'b b')
+})
+
+test('rewriteWikilinks updates stem and basename targets, keeps alias/heading', () => {
+  const src = 'See [[Hub]] and [[Hub#x|alias]] and [[Other]].'
+  const out = rewriteWikilinks(src, 'Hub.md', 'Archive/Hub2.md')
+  assert.match(out, /\[\[Archive\/Hub2\]\]/)
+  assert.match(out, /\[\[Archive\/Hub2#x\|alias\]\]/)
+  assert.match(out, /\[\[Other\]\]/)
+})
+
+test('searchNotes matches title, body and tag', async () => {
+  const { fs, vault, host, allow } = await setup()
+  await mutateNote(fs, host, vault, opts({ rel: 'A.md', kind: 'create', content: '# Alpha\n#topic hello world', tool: 't', onApprove: allow }))
+  await mutateNote(fs, host, vault, opts({ rel: 'B.md', kind: 'create', content: '# Beta\nnothing', tool: 't', onApprove: allow }))
+  const byBody = await searchNotes(fs, vault, { query: 'hello' })
+  assert.equal(byBody.length, 1)
+  assert.equal(byBody[0].path, 'A.md')
+  const byTag = await searchNotes(fs, vault, { tag: 'topic' })
+  assert.equal(byTag.length, 1)
+  const listed = await listNotes(fs, vault, {})
+  assert.deepEqual(listed.map((n) => n.path).sort(), ['A.md', 'B.md'])
+})
+
+test('backlinksFor and structure report orphans', async () => {
+  const { fs, vault, host, allow } = await setup()
+  await mutateNote(fs, host, vault, opts({ rel: 'Hub.md', kind: 'create', content: '# Hub', tool: 't', onApprove: allow }))
+  await mutateNote(fs, host, vault, opts({ rel: 'Spoke.md', kind: 'create', content: 'See [[Hub]]', tool: 't', onApprove: allow }))
+  await mutateNote(fs, host, vault, opts({ rel: 'Lonely.md', kind: 'create', content: 'alone', tool: 't', onApprove: allow }))
+  const back = await backlinksFor(fs, vault, 'Hub.md')
+  assert.equal(back.length, 1)
+  assert.equal(back[0].path, 'Spoke.md')
+  const graph = await collectGraph(fs, vault, {})
+  const snap = structureFromGraph(graph)
+  assert.ok(snap.orphans.includes('Lonely.md'))
+  assert.equal(snap.orphans.includes('Hub.md'), false)
+})
+
+test('moveNote rewrites links, journals, and rollback restores both', async () => {
+  const { fs, host, vault, allow } = await setup()
+  await mutateNote(fs, host, vault, opts({ rel: 'Hub.md', kind: 'create', content: '# Hub', tool: 't', onApprove: allow }))
+  await mutateNote(fs, host, vault, opts({ rel: 'Spoke.md', kind: 'create', content: 'See [[Hub]]', tool: 't', onApprove: allow }))
+  const moved = await moveNote(fs, host, vault, opts({ from: 'Hub.md', to: 'Archive/Hub.md', onApprove: allow }))
+  assert.equal(moved.ok, true)
+  assert.equal(moved.updatedLinks, 1)
+  assert.equal(fs.files.has('/vault/Hub.md'), false)
+  assert.match(fs.files.get('/vault/Spoke.md'), /\[\[Archive\/Hub\]\]/)
+  const undone = await rollbackEntry(fs, host, vault, { opId: moved.opId })
+  assert.equal(undone.ok, true)
+  assert.equal(fs.files.has('/vault/Hub.md'), true)
+  assert.match(fs.files.get('/vault/Spoke.md'), /\[\[Hub\]\]/)
+})
+
+test('parseObsidianVaults prefers open vaults', () => {
+  const rows = parseObsidianVaults(JSON.stringify({
+    vaults: {
+      a: { path: '/notes/a', ts: 1 },
+      b: { path: '/notes/b', ts: 2, open: true },
+    },
+  }))
+  assert.equal(rows[0].path, '/notes/b')
+  assert.equal(rows[0].open, true)
+  assert.deepEqual(obsidianConfigPaths('/Users/me', 'darwin'), ['/Users/me/Library/Application Support/obsidian/obsidian.json'])
+})
+
+test('surfaceOverview fills structure and inbox when those widgets are on', async () => {
+  const { fs, vault, host, allow } = await setup()
+  await mutateNote(fs, host, vault, opts({ rel: 'Loose.md', kind: 'create', content: 'root', tool: 't', onApprove: allow }))
+  await mutateNote(fs, host, vault, opts({ rel: 'Notes/A.md', kind: 'create', content: '# A\n#tag', tool: 't', onApprove: allow }))
+  const overview = await surfaceOverview(fs, vault, { excludes: [], widgets: ['structure', 'inbox'] })
+  assert.ok((overview.inbox ?? []).some((n) => n.path === 'Loose.md'))
+  assert.ok((overview.folders ?? []).some((f) => f.name === 'Notes'))
+  assert.ok((overview.tags ?? []).some((t) => t.name === 'tag'))
+})
+
+test('displayTitle prefers H1 then YAML title then filename', () => {
+  assert.equal(displayTitle({ title: '数据构造反而便宜', frontmatter: { title: 'fm' } }, 'Daily/08-12-2026.md'), '数据构造反而便宜')
+  assert.equal(displayTitle({ title: null, frontmatter: { title: 'Front' } }, 'Daily/08-12-2026.md'), 'Front')
+  assert.equal(displayTitle({ title: null, frontmatter: null }, 'Daily/08-12-2026.md'), '08-12-2026')
+})
+
+test('previewNote allowMissing returns an empty draft for a new path', async () => {
+  const { fs, vault } = await setup()
+  const missing = await previewNote(fs, vault, 'Daily/08-18-2026.md', [], { allowMissing: true })
+  assert.equal(missing.missing, true)
+  assert.equal(missing.path, 'Daily/08-18-2026.md')
+  assert.equal(missing.source, '')
+  assert.equal(missing.title, '08-18-2026')
+  await assert.rejects(() => previewNote(fs, vault, 'Daily/08-18-2026.md'), /does not exist/)
+})
+
+test('previewNote returns title, excerpt and outgoing links', async () => {
+  const { fs, vault, host, allow } = await setup()
+  await mutateNote(fs, host, vault, opts({
+    rel: 'Hub.md', kind: 'create', content: '# Hub\nSee [[Other]] and #tag.',
+    tool: 't', onApprove: allow,
+  }))
+  const preview = await previewNote(fs, vault, 'Hub.md')
+  assert.equal(preview.path, 'Hub.md')
+  assert.equal(preview.title, 'Hub')
+  assert.match(preview.body, /See \[\[Other\]\]/)
+  assert.match(preview.source, /# Hub/)
+  assert.equal(preview.truncated, false)
+  assert.ok(preview.wikilinks.includes('Other'))
+  assert.ok(preview.tags.includes('tag'))
 })
 
 test('surfaceOverview recent is newest-mtime first, not walk/name order', async () => {

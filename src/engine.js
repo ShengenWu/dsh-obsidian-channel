@@ -26,6 +26,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto'
+import { HOME_WIDGETS_NEED_WALK, resolveWidgetIds } from './home-catalog.js'
 
 // ---------------------------------------------------------------------------
 // Constants & errors
@@ -161,7 +162,7 @@ export function parseNote(text) {
   const fmTagStr = (typeof result.frontmatter?.tags === 'string' ? result.frontmatter.tags : '').replace(/^\[|\]$/g, '')
   const fmTagList = fmTagStr.split(/[,\s]+/).filter(Boolean)
   const fmTags = Array.isArray(result.frontmatter?.tags) ? result.frontmatter.tags.map(String) : []
-  const inlineTags = [...result.body.matchAll(/(?:^|[ \t])#([A-Za-z0-9_\u4e00-\u9fff/-]+)/g)].map((x) => x[1])
+  const inlineTags = [...result.body.matchAll(/(?:^|[ \t])#([A-Za-z0-9_\u4e00-\u9fff/-]+)/gm)].map((x) => x[1])
   result.tags = [...new Set([...fmTags, ...fmTagList, ...inlineTags])]
   result.wikilinks = [...result.body.matchAll(/\[\[([^\]|#^]+)(?:[|#][^\]]*)?\]\]/g)].map((x) => x[1].trim())
   return result
@@ -247,6 +248,44 @@ export function applyFrontmatterEdit(originalText, updates = {}, deletes = []) {
   const tail = m[0].slice(innerStart + m[1].length)
   const text = head + newBlock + tail + originalText.slice(m[0].length)
   return { text, changed: edits.length > 0, edits }
+}
+
+/**
+ * Literal string replacement (iamzcr-style). oldString must appear exactly
+ * once unless replaceAll is set.
+ */
+export function applyLiteralReplace(current, oldString, newString, replaceAll = false) {
+  if (typeof oldString !== 'string' || oldString === '') {
+    throw new SafeError('oldString must be a non-empty string', 'INVALID_ARGS')
+  }
+  const next = String(newString ?? '')
+  const idx = current.indexOf(oldString)
+  if (idx < 0) throw new SafeError('oldString not found in the note', 'NOT_FOUND')
+  if (!replaceAll && current.indexOf(oldString, idx + oldString.length) >= 0) {
+    throw new SafeError('oldString appears multiple times; set replaceAll or disambiguate', 'AMBIGUOUS')
+  }
+  const text = replaceAll
+    ? current.split(oldString).join(next)
+    : current.slice(0, idx) + next + current.slice(idx + oldString.length)
+  return { nextText: text, changed: text !== current }
+}
+
+/** Rewrite wikilinks that pointed at fromRel so they point at toRel. */
+export function rewriteWikilinks(text, fromRel, toRel) {
+  const fromStem = stemOf(fromRel)
+  const toStem = stemOf(toRel)
+  const fromBase = baseOf(fromRel)
+  const toBase = baseOf(toRel)
+  if (fromStem === toStem && fromBase === toBase) return text
+  return text.replace(/\[\[([^\]|#\n]+)((?:#[^\]|\n]*)?)((?:\|[^\]]*)?)\]\]/g, (all, target, hash = '', alias = '') => {
+    const t = String(target ?? '').replace(/\\/g, '/').replace(/\.md$/i, '').trim()
+    let next = null
+    if (t === fromStem) next = toStem
+    else if (t === fromBase && fromBase !== fromStem) next = toBase
+    else if (t === fromBase) next = toBase
+    if (next === null) return all
+    return '[[' + next + hash + alias + ']]'
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -359,10 +398,13 @@ export function computeNextText(kind, current, opts) {
       const nextText = fm + String(opts.content)
       return { nextText, changed: nextText !== current }
     }
+    if (opts.oldString !== undefined && opts.oldString !== null) {
+      return applyLiteralReplace(current, opts.oldString, opts.newString ?? '', opts.replaceAll === true)
+    }
     if (hasFmEdit) {
       return applyFrontmatterEdit(current, opts.frontmatterUpdates, opts.frontmatterDeletes)
     }
-    throw new SafeError('update requires content, frontmatterUpdates or frontmatterDeletes', 'INVALID_ARGS')
+    throw new SafeError('update requires content, oldString, frontmatterUpdates or frontmatterDeletes', 'INVALID_ARGS')
   }
   const addition = String(opts.content ?? '')
   if (addition === '') return { nextText: current, changed: false }
@@ -552,6 +594,104 @@ export async function deleteNote(fs, host, vault, opts) {
   return { ok: true, action: 'delete', path: relPath, opId, trashRel, beforeHash, afterHash: null, message: 'moved to trash (opId ' + opId + ')' }
 }
 
+/**
+ * Move / rename a note and rewrite wikilinks that pointed at it.
+ * Journaled as kind=move so rollback can restore the path and the rewrites.
+ */
+export async function moveNote(fs, host, vault, opts) {
+  const fromLoc = await resolveNotePath(fs, vault, opts.from, opts.excludes)
+  const toLoc = await resolveNotePath(fs, vault, opts.to, opts.excludes)
+  if (fromLoc.rel === toLoc.rel) {
+    return { ok: true, action: 'skip', path: toLoc.rel, message: 'source and destination are the same' }
+  }
+  const fromInfo = await fs.stat(fromLoc.target)
+  if (fromInfo === undefined) return { ok: false, action: 'error', path: fromLoc.rel, message: 'note does not exist' }
+  const toInfo = await fs.stat(toLoc.target)
+  if (toInfo !== undefined) return { ok: false, action: 'conflict', path: toLoc.rel, message: 'destination already exists' }
+  const current = await fs.readText(fromLoc.target)
+  const beforeHash = sha256(current)
+  const { notes } = await walkVaultNotes(fs, vault, { excludes: opts.excludes ?? [] })
+  const rewrites = []
+  for (const note of notes) {
+    if (note.rel === fromLoc.rel) continue
+    let text
+    try { text = await fs.readText(note.target) } catch { continue }
+    if (typeof text !== 'string' || text.length > NOTE_READ_CAP) continue
+    const next = rewriteWikilinks(text, fromLoc.rel, toLoc.rel)
+    if (next === text) continue
+    rewrites.push({
+      path: note.rel,
+      before: text,
+      after: next,
+      beforeHash: sha256(text),
+      afterHash: sha256(next),
+    })
+  }
+  const plan = {
+    tool: 'obsidian_move',
+    path: toLoc.rel,
+    kind: 'move',
+    from: fromLoc.rel,
+    to: toLoc.rel,
+    beforeHash,
+    afterHash: beforeHash,
+    before: current,
+    after: current,
+    changed: true,
+    size: current.length,
+    updatedLinks: rewrites.length,
+    rewrites: rewrites.map((r) => ({ path: r.path, beforeHash: r.beforeHash, afterHash: r.afterHash })),
+  }
+  if (opts.dryRun === true) return { ok: true, action: 'dry-run', path: toLoc.rel, plan }
+  const outcome = await (opts.onApprove ?? (async () => 'unavailable'))(plan)
+  if (outcome !== 'allowed-once') {
+    return { ok: false, action: 'denied', path: toLoc.rel, outcome, message: 'approval outcome: ' + outcome }
+  }
+  const opId = journalEntryId()
+  const entry = {
+    opId,
+    ts: monotonicNow(),
+    sessionId: opts.sessionId ?? null,
+    tool: 'obsidian_move',
+    path: toLoc.rel,
+    kind: 'move',
+    status: 'planned',
+    from: fromLoc.rel,
+    to: toLoc.rel,
+    beforeHash,
+    before: current,
+    afterHash: beforeHash,
+    after: current,
+    rewrites,
+    args: { ...(opts.argsSanitized ?? {}), from: fromLoc.rel, to: toLoc.rel },
+  }
+  await writeJournalEntry(fs, vault, entry, opts.sandboxPolicy)
+  const destParent = toLoc.abs.slice(0, toLoc.abs.lastIndexOf('/'))
+  if (destParent !== '' && destParent !== vault.vaultAbs) await host.mkdirP(destParent)
+  await host.rename(fromLoc.abs, toLoc.abs)
+  for (const rw of rewrites) {
+    const loc = await resolveNotePath(fs, vault, rw.path, opts.excludes)
+    const info = await fs.stat(loc.target)
+    const intent = info === undefined ? { kind: 'createIfAbsent' } : { kind: 'replaceIfVersion', version: info.version }
+    await fs.writeText(loc.target, rw.after, intent, undefined, opts.sandboxPolicy)
+  }
+  entry.status = 'done'
+  await updateJournalEntry(fs, vault, entry, undefined, opts.sandboxPolicy)
+  await pruneJournal(fs, host, vault, opts.journalRetentionDays ?? 30)
+  return {
+    ok: true,
+    action: 'move',
+    path: toLoc.rel,
+    from: fromLoc.rel,
+    to: toLoc.rel,
+    opId,
+    updatedLinks: rewrites.length,
+    beforeHash,
+    afterHash: beforeHash,
+    message: 'moved ' + fromLoc.rel + ' -> ' + toLoc.rel + ' (' + rewrites.length + ' links updated, opId ' + opId + ')',
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Rollback (L4)
 // ---------------------------------------------------------------------------
@@ -577,7 +717,28 @@ export async function rollbackEntry(fs, host, vault, { relPath, opId, journalRet
 
   // Never clobber concurrent changes: the file must still be exactly what the
   // entry produced (update/append) or absent (create/delete).
-  if (entry.kind === 'delete') {
+  if (entry.kind === 'move') {
+    const destCurrent = current
+    const destHash = currentHash
+    if (destCurrent === null || destHash !== entry.afterHash) {
+      return { ok: false, action: 'conflict', path: targetRel, message: 'moved note changed after the recorded operation; refusing to roll back' }
+    }
+    const fromLoc = await resolveNotePath(fs, vault, entry.from, DEFAULT_EXCLUDES)
+    const fromStat = await fs.stat(fromLoc.target)
+    if (fromStat !== undefined) {
+      return { ok: false, action: 'conflict', path: entry.from, message: 'source path is occupied again; refusing to roll back the move' }
+    }
+    for (const rw of entry.rewrites ?? []) {
+      const rloc = await resolveNotePath(fs, vault, rw.path, DEFAULT_EXCLUDES)
+      let now
+      try { now = await fs.readText(rloc.target) } catch {
+        return { ok: false, action: 'conflict', path: rw.path, message: 'a rewritten note is missing; refusing to roll back the move' }
+      }
+      if (sha256(now) !== rw.afterHash) {
+        return { ok: false, action: 'conflict', path: rw.path, message: 'a rewritten note changed after the move; refusing to roll back' }
+      }
+    }
+  } else if (entry.kind === 'delete') {
     if (current !== null) {
       return { ok: false, action: 'conflict', path: targetRel, message: 'file exists at the deleted path (someone recreated it); manual review required' }
     }
@@ -621,6 +782,21 @@ export async function rollbackEntry(fs, host, vault, { relPath, opId, journalRet
     rollbackEntryBase.afterHash = entry.beforeHash
     rollbackEntryBase.after = entry.before
     message = 'delete undone (note restored from trash)'
+  } else if (entry.kind === 'move') {
+    const fromLoc = await resolveNotePath(fs, vault, entry.from, DEFAULT_EXCLUDES)
+    const fromParent = fromLoc.abs.slice(0, fromLoc.abs.lastIndexOf('/'))
+    if (fromParent !== '' && fromParent !== vault.vaultAbs) await host.mkdirP(fromParent)
+    await host.rename(loc.abs, fromLoc.abs)
+    for (const rw of entry.rewrites ?? []) {
+      const rloc = await resolveNotePath(fs, vault, rw.path, DEFAULT_EXCLUDES)
+      const info = await fs.stat(rloc.target)
+      const intent = info === undefined ? { kind: 'createIfAbsent' } : { kind: 'replaceIfVersion', version: info.version }
+      await fs.writeText(rloc.target, rw.before, intent, undefined, sandboxPolicy)
+    }
+    rollbackEntryBase.path = entry.from
+    rollbackEntryBase.afterHash = entry.beforeHash
+    rollbackEntryBase.after = entry.before
+    message = 'move undone (' + entry.to + ' -> ' + entry.from + ')'
   } else {
     const beforeText = entry.before ?? ''
     const intent = statInfo === undefined
@@ -771,6 +947,10 @@ export async function batchMutate(fs, host, vault, { ops = [], dryRun = false, s
     if (action === 'delete') {
       res = await deleteNote(effectiveFs, host, vault, { ...rest, rel: path, sessionId, onApprove, excludes, journalRetentionDays, dryRun, sandboxPolicy })
       if (dryRun && res.ok) overlay.set(vault.vaultAbs + '/' + path, null)
+    } else if (action === 'move') {
+      res = await moveNote(effectiveFs, host, vault, {
+        ...rest, from: rest.from ?? path, to: rest.to, sessionId, onApprove, excludes, journalRetentionDays, dryRun, sandboxPolicy,
+      })
     } else if (action === 'create' || action === 'update' || action === 'append') {
       res = await mutateNote(effectiveFs, host, vault, { ...rest, rel: path, kind: action, tool: 'obsidian_batch:' + action, sessionId, onApprove, excludes, journalRetentionDays, dryRun, sandboxPolicy })
       if (dryRun && res.ok && res.action === 'dry-run' && res.plan !== undefined) {
@@ -788,16 +968,16 @@ export async function batchMutate(fs, host, vault, { ops = [], dryRun = false, s
 }
 
 // ---------------------------------------------------------------------------
-// Surface overview (今日 / 最近 / 变更 / 断链) — panel data, not a tool
+// Homepage surface — widget-scoped panel data, not a tool
 // ---------------------------------------------------------------------------
 
 const WALK_FILE_LIMIT = 4000
 const NOTE_READ_CAP = 512 * 1024
 
-const DEFAULT_DAILY_FORMAT = 'YYYY-MM-DD'
+const DEFAULT_DAILY_FORMAT = 'MM-DD-YYYY'
 const DEFAULT_DAILY_FOLDER = 'Daily'
 
-/** YYYY-MM-DD in local time (fallback when no format is configured). */
+/** MM-DD-YYYY in local time (fallback when no format is configured). */
 export function todayStamp(now = Date.now()) {
   return formatDailyName(now, DEFAULT_DAILY_FORMAT)
 }
@@ -851,17 +1031,36 @@ export async function readDailyNotesSetting(fs, vault) {
   }
 }
 
+/** True when a real daily habit exists (Obsidian setting or plugin override). */
+export function hasDailyHabit(daily) {
+  return daily != null
+    && daily.source !== 'none'
+    && typeof daily.todayRel === 'string'
+    && daily.todayRel !== ''
+}
+
 /**
- * Resolve daily folder/format: plugin override if set, else Obsidian's file,
- * else Daily + YYYY-MM-DD.
+ * Resolve daily folder/format: plugin override if set, else Obsidian's file.
+ * Does not invent Daily/MM-DD-YYYY when neither source exists.
  */
 export async function loadDailyHabit(fs, vault, cfg = {}, now = Date.now()) {
   const overrideFolder = typeof cfg.dailyFolder === 'string' ? cfg.dailyFolder.trim() : ''
   const overrideFormat = typeof cfg.dailyFormat === 'string' ? cfg.dailyFormat.trim() : ''
   const fromOb = await readDailyNotesSetting(fs, vault)
+  const hasOverride = overrideFolder !== '' || overrideFormat !== ''
+  if (fromOb === null && !hasOverride) {
+    return {
+      folder: '',
+      format: '',
+      template: '',
+      source: 'none',
+      stamp: formatDailyName(now, DEFAULT_DAILY_FORMAT),
+      todayRel: null,
+    }
+  }
   let folder = DEFAULT_DAILY_FOLDER
   let format = DEFAULT_DAILY_FORMAT
-  let source = 'default'
+  let source = 'none'
   let template = ''
   if (fromOb !== null) {
     folder = fromOb.folder
@@ -871,7 +1070,7 @@ export async function loadDailyHabit(fs, vault, cfg = {}, now = Date.now()) {
   }
   if (overrideFolder !== '') {
     folder = overrideFolder
-    source = source === 'obsidian' ? 'override' : 'override'
+    source = 'override'
   }
   if (overrideFormat !== '') {
     format = overrideFormat
@@ -929,6 +1128,15 @@ function baseOf(rel) {
   return stemOf(segs[segs.length - 1] ?? rel)
 }
 
+/** List/preview name: first H1, else YAML title, else the filename. */
+export function displayTitle(parsed, rel) {
+  const heading = typeof parsed?.title === 'string' ? parsed.title.trim() : ''
+  if (heading !== '') return heading
+  const fm = parsed?.frontmatter?.title
+  if (typeof fm === 'string' && fm.trim() !== '') return fm.trim()
+  return baseOf(rel)
+}
+
 function linkHits(target, stems, bases) {
   const raw = String(target ?? '').replace(/\\/g, '/').replace(/\.md$/i, '').trim()
   if (raw === '') return true
@@ -938,13 +1146,185 @@ function linkHits(target, stems, bases) {
   return bases.has(base)
 }
 
-async function readTitle(fs, target) {
+export function linkTargetMatchesNote(target, noteRel) {
+  const t = String(target ?? '').replace(/\\/g, '/').replace(/\.md$/i, '').trim().toLowerCase()
+  const stem = stemOf(noteRel).toLowerCase()
+  const base = baseOf(noteRel).toLowerCase()
+  return t === stem || t === base || t.endsWith('/' + base)
+}
+
+function snippetAround(text, needle, radius = 80) {
+  const hay = text.toLowerCase()
+  const q = needle.toLowerCase()
+  const idx = q === '' ? 0 : hay.indexOf(q)
+  if (idx < 0) return text.slice(0, radius * 2)
+  const start = Math.max(0, idx - radius)
+  const end = Math.min(text.length, idx + q.length + radius)
+  return (start > 0 ? '…' : '') + text.slice(start, end).replace(/\s+/g, ' ') + (end < text.length ? '…' : '')
+}
+
+/**
+ * Full-text / title / tag search. JS scan (no rg dependency).
+ */
+export async function searchNotes(fs, vault, {
+  query = '',
+  tag,
+  dir,
+  limit = 50,
+  excludes = [],
+  fileLimit = WALK_FILE_LIMIT,
+} = {}) {
+  const q = String(query ?? '').trim().toLowerCase()
+  const tagNeedle = typeof tag === 'string' ? tag.replace(/^#/, '').trim().toLowerCase() : ''
+  if (q === '' && tagNeedle === '') return []
+  const prefix = typeof dir === 'string' ? dir.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '') : ''
+  const { notes } = await walkVaultNotes(fs, vault, { excludes, fileLimit })
+  const hits = []
+  const cap = Math.min(Math.max(Number(limit) || 50, 1), 200)
+  for (const note of notes) {
+    if (hits.length >= cap) break
+    if (prefix !== '' && note.rel !== prefix && !note.rel.startsWith(prefix + '/')) continue
+    let text
+    try { text = await fs.readText(note.target) } catch { continue }
+    if (typeof text !== 'string' || text.length > NOTE_READ_CAP) continue
+    const parsed = parseNote(text)
+    const tags = (parsed.tags ?? []).map((t) => String(t).toLowerCase())
+    if (tagNeedle !== '' && !tags.some((t) => t === tagNeedle || t.endsWith('/' + tagNeedle))) continue
+    if (q !== '') {
+      const title = displayTitle(parsed, note.rel).toLowerCase()
+      const hay = title + '\n' + parsed.body.toLowerCase()
+      if (!hay.includes(q) && !note.rel.toLowerCase().includes(q)) continue
+    }
+    hits.push({
+      path: note.rel,
+      title: displayTitle(parsed, note.rel),
+      snippet: q === '' ? (parsed.body ?? '').slice(0, 160).replace(/\s+/g, ' ') : snippetAround(parsed.body ?? '', q),
+      tags: parsed.tags ?? [],
+    })
+  }
+  return hits
+}
+
+export async function listNotes(fs, vault, { dir, limit = 200, excludes = [], fileLimit = WALK_FILE_LIMIT } = {}) {
+  const prefix = typeof dir === 'string' ? dir.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '') : ''
+  const { notes } = await walkVaultNotes(fs, vault, { excludes, fileLimit })
+  const cap = Math.min(Math.max(Number(limit) || 200, 1), 500)
+  const out = []
+  for (const note of notes) {
+    if (prefix !== '' && note.rel !== prefix && !note.rel.startsWith(prefix + '/')) continue
+    out.push({ path: note.rel, title: baseOf(note.rel) })
+    if (out.length >= cap) break
+  }
+  return out
+}
+
+export async function collectGraph(fs, vault, { excludes = [], fileLimit = WALK_FILE_LIMIT, notes: given } = {}) {
+  const { notes, truncated } = given !== undefined
+    ? { notes: given, truncated: false }
+    : await walkVaultNotes(fs, vault, { excludes, fileLimit })
+  const outgoing = new Map()
+  const backlinks = new Map()
+  const tagCounts = new Map()
+  const tagToNotes = new Map()
+  for (const note of notes) {
+    let text
+    try { text = await fs.readText(note.target) } catch { continue }
+    if (typeof text !== 'string' || text.length > NOTE_READ_CAP) continue
+    const parsed = parseNote(text)
+    const out = []
+    for (const target of parsed.wikilinks ?? []) {
+      out.push(target)
+      const list = backlinks.get(target) ?? []
+      list.push({ path: note.rel, title: parsed.title ?? baseOf(note.rel), snippet: snippetAround(parsed.body ?? '', target, 40) })
+      backlinks.set(target, list)
+    }
+    outgoing.set(note.rel, out)
+    for (const tag of parsed.tags ?? []) {
+      tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1)
+      const list = tagToNotes.get(tag) ?? []
+      list.push(note.rel)
+      tagToNotes.set(tag, list)
+    }
+  }
+  const orphans = []
+  for (const note of notes) {
+    const hasOut = (outgoing.get(note.rel) ?? []).length > 0
+    const hasIn = [...backlinks.entries()].some(([target, from]) => from.length > 0 && linkTargetMatchesNote(target, note.rel))
+    if (!hasOut && !hasIn) orphans.push(note.rel)
+  }
+  const folders = new Map()
+  for (const note of notes) {
+    const top = note.rel.includes('/') ? note.rel.split('/')[0] : '(root)'
+    folders.set(top, (folders.get(top) ?? 0) + 1)
+  }
+  return {
+    notes,
+    truncated,
+    outgoing,
+    backlinks,
+    tagCounts,
+    tagToNotes,
+    orphans,
+    folders,
+  }
+}
+
+export async function backlinksFor(fs, vault, noteRel, { excludes = [] } = {}) {
+  const graph = await collectGraph(fs, vault, { excludes })
+  const hits = []
+  const seen = new Set()
+  for (const [target, from] of graph.backlinks) {
+    if (!linkTargetMatchesNote(target, noteRel)) continue
+    for (const row of from) {
+      if (seen.has(row.path)) continue
+      seen.add(row.path)
+      hits.push(row)
+    }
+  }
+  return hits
+}
+
+export function structureFromGraph(graph, { tagLimit = 20, orphanLimit = 20, folderLimit = 24 } = {}) {
+  const folders = [...graph.folders.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, folderLimit)
+    .map(([name, count]) => ({ name, count }))
+  const tags = [...graph.tagCounts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, tagLimit)
+    .map(([name, count]) => ({ name, count }))
+  return {
+    folders,
+    tags,
+    orphans: graph.orphans.slice(0, orphanLimit),
+    orphanCount: graph.orphans.length,
+    noteCount: graph.notes.length,
+    truncated: graph.truncated,
+  }
+}
+
+async function readTitle(fs, target, rel) {
+  if (target === undefined || target === null) return baseOf(rel ?? '')
   try {
     const text = await fs.readText(target)
-    if (typeof text !== 'string' || text.length > NOTE_READ_CAP) return null
-    return parseNote(text).title
+    if (typeof text !== 'string' || text.length > NOTE_READ_CAP) return baseOf(rel ?? '')
+    return displayTitle(parseNote(text), rel ?? '')
   } catch {
-    return null
+    return baseOf(rel ?? '')
+  }
+}
+
+const CARD_EXCERPT_CAP = 180
+
+async function readExcerpt(fs, target) {
+  if (target === undefined || target === null) return ''
+  try {
+    const text = await fs.readText(target)
+    if (typeof text !== 'string' || text.length > NOTE_READ_CAP) return ''
+    const body = String(parseNote(text).body ?? '').replace(/\s+/g, ' ').trim()
+    return body.length > CARD_EXCERPT_CAP ? body.slice(0, CARD_EXCERPT_CAP) : body
+  } catch {
+    return ''
   }
 }
 
@@ -977,10 +1357,111 @@ export async function readMtimeMs(fs, host, note) {
   return 0
 }
 
+const PREVIEW_CHAR_CAP = 4000
+
 /**
- * One payload for the Obsidian center-column surface: today's daily (if any),
- * recently touched notes, recent journalled changes, and a broken-wikilink
- * sample. Read-only; never writes.
+ * In-page note preview / editor payload. `source` is the full file;
+ * `body` stays a capped excerpt for list cards.
+ */
+export async function previewNote(fs, vault, relPath, excludes = [], opts = {}) {
+  const loc = await resolveNotePath(fs, vault, relPath, excludes)
+  const info = await fs.stat(loc.target)
+  if (info === undefined) {
+    if (opts.allowMissing !== true) throw new SafeError('note does not exist: ' + loc.rel, 'NOT_FOUND')
+    return {
+      path: loc.rel,
+      title: displayTitle({ title: null, frontmatter: null }, loc.rel),
+      source: '',
+      version: null,
+      body: '',
+      truncated: false,
+      missing: true,
+      tags: [],
+      wikilinks: [],
+    }
+  }
+  const text = await fs.readText(loc.target)
+  if (typeof text !== 'string') throw new SafeError('note is not readable: ' + loc.rel, 'NOT_FOUND')
+  const parsed = parseNote(text)
+  const body = typeof parsed.body === 'string' ? parsed.body : ''
+  return {
+    path: loc.rel,
+    title: displayTitle(parsed, loc.rel),
+    source: text,
+    version: info.version ?? null,
+    body: body.length > PREVIEW_CHAR_CAP ? body.slice(0, PREVIEW_CHAR_CAP) : body,
+    truncated: body.length > PREVIEW_CHAR_CAP,
+    missing: false,
+    tags: parsed.tags ?? [],
+    wikilinks: (parsed.wikilinks ?? []).slice(0, 24),
+  }
+}
+
+const STAT_CONCURRENCY = 16
+
+async function mapPool(items, limit, fn) {
+  const out = new Array(items.length)
+  let next = 0
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const i = next
+      next += 1
+      out[i] = await fn(items[i], i)
+    }
+  })
+  await Promise.all(workers)
+  return out
+}
+
+async function collectRecent(fs, host, notes, done, recentLimit) {
+  const lastJournal = new Map()
+  for (const e of done) {
+    if (!lastJournal.has(e.path)) lastJournal.set(e.path, e.ts)
+  }
+  const mtimes = notes.length === 0 ? [] : await mapPool(notes, STAT_CONCURRENCY, (note) => readMtimeMs(fs, host, note))
+  const ranked = []
+  for (let i = 0; i < notes.length; i++) {
+    const note = notes[i]
+    let mtime = mtimes[i] ?? 0
+    const journalTs = lastJournal.get(note.rel)
+    if (typeof journalTs === 'number' && journalTs > mtime) mtime = journalTs
+    ranked.push({ note, mtime })
+  }
+  ranked.sort((a, b) => b.mtime - a.mtime || a.note.rel.localeCompare(b.note.rel))
+  const recent = []
+  for (const row of ranked.slice(0, recentLimit)) {
+    recent.push({
+      path: row.note.rel,
+      title: await readTitle(fs, row.note.target, row.note.rel),
+    })
+  }
+  return recent
+}
+
+function collectBroken(notes, texts, brokenLimit) {
+  const stems = new Set()
+  const bases = new Set()
+  for (const note of notes) {
+    stems.add(stemOf(note.rel).toLowerCase())
+    bases.add(baseOf(note.rel).toLowerCase())
+  }
+  const broken = []
+  let brokenCount = 0
+  for (const note of notes) {
+    const text = texts.get(note.rel)
+    if (typeof text !== 'string') continue
+    for (const target of parseNote(text).wikilinks) {
+      if (linkHits(target, stems, bases)) continue
+      brokenCount += 1
+      if (broken.length < brokenLimit) broken.push({ from: note.rel, target })
+    }
+  }
+  return { broken, brokenCount }
+}
+
+/**
+ * Homepage payload. Only computes data for the requested widgets so a closed
+ * links/daily module never walks note bodies.
  */
 export async function surfaceOverview(fs, vault, {
   excludes = [],
@@ -991,82 +1472,110 @@ export async function surfaceOverview(fs, vault, {
   host,
   dailyFolder,
   dailyFormat,
+  widgets,
 } = {}) {
-  const { notes, truncated } = await walkVaultNotes(fs, vault, { excludes, fileLimit })
-  const rels = notes.map((n) => n.rel)
-  const byRel = new Map(notes.map((n) => [n.rel, n]))
-
-  const stems = new Set()
-  const bases = new Set()
-  for (const rel of rels) {
-    stems.add(stemOf(rel).toLowerCase())
-    bases.add(baseOf(rel).toLowerCase())
+  const wanted = new Set(resolveWidgetIds(widgets))
+  const out = {
+    vault: vault.vaultAbs,
+    widgets: [...wanted],
   }
 
-  const daily = await loadDailyHabit(fs, vault, { dailyFolder, dailyFormat })
-  const todayPath = pickDailyPath(rels, daily.todayRel)
-  const today = todayPath === null ? null : {
-    path: todayPath,
-    title: await readTitle(fs, byRel.get(todayPath)?.target),
+  let notes = []
+  if ([...wanted].some((id) => HOME_WIDGETS_NEED_WALK.has(id))) {
+    const walked = await walkVaultNotes(fs, vault, { excludes, fileLimit })
+    notes = walked.notes
+    out.noteCount = notes.length
+    out.truncated = walked.truncated
   }
 
-  const journal = await listJournal(fs, vault, { limit: 80 })
-  const done = journal.filter((e) => e.status === 'done' && typeof e.path === 'string' && e.path !== '')
-  const lastJournal = new Map()
-  for (const e of done) {
-    if (!lastJournal.has(e.path)) lastJournal.set(e.path, e.ts)
+  let done = []
+  if (wanted.has('continue') || wanted.has('changes')) {
+    const journal = await listJournal(fs, vault, { limit: 80 })
+    done = journal.filter((e) => e.status === 'done' && typeof e.path === 'string' && e.path !== '')
   }
 
-  const ranked = []
-  for (const note of notes) {
-    let mtime = await readMtimeMs(fs, host, note)
-    const journalTs = lastJournal.get(note.rel)
-    if (typeof journalTs === 'number' && journalTs > mtime) mtime = journalTs
-    ranked.push({ note, mtime })
-  }
-  ranked.sort((a, b) => b.mtime - a.mtime || a.note.rel.localeCompare(b.note.rel))
-
-  const recent = []
-  for (const row of ranked.slice(0, recentLimit)) {
-    recent.push({
-      path: row.note.rel,
-      title: await readTitle(fs, row.note.target),
-    })
+  if (wanted.has('continue')) {
+    out.recent = await collectRecent(fs, host, notes, done, recentLimit)
   }
 
-  const changes = done.slice(0, changeLimit).map((e) => ({
-    opId: e.opId,
-    ts: e.ts,
-    path: e.path,
-    kind: e.kind,
-    status: e.status,
-  }))
+  if (wanted.has('changes')) {
+    out.changes = done.slice(0, changeLimit).map((e) => ({
+      opId: e.opId,
+      ts: e.ts,
+      path: e.path,
+      kind: e.kind,
+      status: e.status,
+    }))
+  }
 
-  const broken = []
-  let brokenCount = 0
-  for (const note of notes) {
-    let text
-    try { text = await fs.readText(note.target) } catch { continue }
-    if (typeof text !== 'string' || text.length > NOTE_READ_CAP) continue
-    const links = parseNote(text).wikilinks
-    for (const target of links) {
-      if (linkHits(target, stems, bases)) continue
-      brokenCount += 1
-      if (broken.length < brokenLimit) broken.push({ from: note.rel, target })
+  if (wanted.has('daily')) {
+    const daily = await loadDailyHabit(fs, vault, { dailyFolder, dailyFormat })
+    out.daily = daily
+    out.todayDate = daily.stamp
+    if (hasDailyHabit(daily)) {
+      out.todayRel = daily.todayRel
+      const todayPath = pickDailyPath(notes.map((n) => n.rel), daily.todayRel)
+      const byRel = new Map(notes.map((n) => [n.rel, n]))
+      out.today = todayPath === null ? null : {
+        path: todayPath,
+        title: await readTitle(fs, byRel.get(todayPath)?.target, todayPath),
+        excerpt: await readExcerpt(fs, byRel.get(todayPath)?.target),
+      }
+    } else {
+      out.todayRel = null
+      out.today = null
     }
   }
 
-  return {
-    vault: vault.vaultAbs,
-    noteCount: notes.length,
-    truncated,
-    todayDate: daily.stamp,
-    todayRel: daily.todayRel,
-    daily,
-    today,
-    recent,
-    changes,
-    brokenCount,
-    broken,
+  const needGraph = wanted.has('links') || wanted.has('structure')
+  let graph = null
+  if (needGraph) {
+    graph = await collectGraph(fs, vault, { excludes, fileLimit, notes })
   }
+
+  if (wanted.has('links') && graph !== null) {
+    const stems = new Set()
+    const bases = new Set()
+    for (const note of graph.notes) {
+      stems.add(stemOf(note.rel).toLowerCase())
+      bases.add(baseOf(note.rel).toLowerCase())
+    }
+    const broken = []
+    let brokenCount = 0
+    for (const [fromRel, targets] of graph.outgoing) {
+      for (const target of targets) {
+        if (linkHits(target, stems, bases)) continue
+        brokenCount += 1
+        if (broken.length < brokenLimit) broken.push({ from: fromRel, target })
+      }
+    }
+    out.broken = broken
+    out.brokenCount = brokenCount
+    out.orphans = graph.orphans.slice(0, brokenLimit)
+    out.orphanCount = graph.orphans.length
+  }
+
+  if (wanted.has('structure') && graph !== null) {
+    const snap = structureFromGraph(graph)
+    out.folders = snap.folders
+    out.tags = snap.tags
+    if (out.orphans === undefined) {
+      out.orphans = snap.orphans
+      out.orphanCount = snap.orphanCount
+    }
+  }
+
+  if (wanted.has('inbox')) {
+    out.inbox = []
+    for (const note of notes) {
+      if (note.rel.includes('/')) continue
+      out.inbox.push({
+        path: note.rel,
+        title: await readTitle(fs, note.target, note.rel),
+      })
+      if (out.inbox.length >= recentLimit) break
+    }
+  }
+
+  return out
 }

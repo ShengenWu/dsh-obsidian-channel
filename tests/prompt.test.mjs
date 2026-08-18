@@ -20,9 +20,23 @@ test('guidanceForAssembly emits write-tool rules in a vault session', () => {
   const text = guidanceForAssembly({ agent: { session: { header: { cwd: vault } } } }, vault)
   assert.equal(text, vaultGuidance(vault, undefined))
   assert.match(text, /obsidian_note_create/)
-  assert.match(text, /today's note path/)
-  assert.match(text, /native read/)
-  assert.match(text, /Do not prefer obsidian_read unless/)
+  assert.match(text, /obsidian_search/)
+  assert.match(text, /obsidian_move/)
+  assert.doesNotMatch(text, /today's note path/)
+})
+
+test('vaultGuidance mentions daily notes only when a habit exists', () => {
+  const vault = '/Users/me/obsidian'
+  const bare = vaultGuidance(vault, { source: 'none', todayRel: null })
+  assert.doesNotMatch(bare, /Daily notes/)
+  const withHabit = vaultGuidance(vault, {
+    source: 'obsidian',
+    folder: 'Daily',
+    format: 'MM-DD-YYYY',
+    todayRel: 'Daily/08-16-2026.md',
+  })
+  assert.match(withHabit, /today's note path: Daily\/08-16-2026\.md/)
+  assert.match(withHabit, /daily-notes\.json/)
 })
 
 test('sessionCwd reads header.cwd', () => {
